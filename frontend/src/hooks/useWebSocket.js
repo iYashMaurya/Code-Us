@@ -24,7 +24,6 @@ export function useWebSocket(roomId) {
             dispatch({ type: 'SET_PLAYER_ID', payload: message.data.playerID });
             dispatch({ type: 'SET_ROOM_ID', payload: message.data.roomID });
             
-            // Send JOIN message
             if (state.username) {
               ws.send(JSON.stringify({
                 type: 'JOIN',
@@ -33,12 +32,45 @@ export function useWebSocket(roomId) {
             }
             break;
 
+          case 'SELF':
+            // Update current player info (including role)
+            console.log('SELF message received:', message.data);
+            dispatch({ 
+              type: 'SET_PLAYERS', 
+              payload: { 
+                ...state.players, 
+                [message.data.id]: message.data 
+              } 
+            });
+            break;
+
           case 'PLAYER_LIST':
+            console.log('PLAYER_LIST received:', message.data);
             dispatch({ type: 'SET_PLAYERS', payload: message.data });
             break;
 
           case 'GAME_STATE':
+            console.log('GAME_STATE received:', message.data);
             dispatch({ type: 'SET_GAME_STATE', payload: message.data });
+            break;
+
+          case 'VOTE_UPDATE':
+            console.log('VOTE_UPDATE received:', message.data);
+            dispatch({ type: 'UPDATE_VOTES', payload: message.data });
+            break;
+
+          case 'VOTE_RESULT':
+            console.log('VOTE_RESULT received:', message.data);
+            // Show vote result
+            dispatch({ 
+              type: 'ADD_MESSAGE', 
+              payload: { 
+                text: message.data.eliminated 
+                  ? `${state.players[message.data.eliminated]?.username} was eliminated!`
+                  : 'No one was eliminated.',
+                system: true 
+              } 
+            });
             break;
 
           case 'CHAT':

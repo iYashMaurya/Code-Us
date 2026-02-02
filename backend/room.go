@@ -1,11 +1,13 @@
 package main
-
 import (
 	"encoding/json"
 	"log"
 	"math/rand"
+	"net/http"
 	"sync"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 type GamePhase string
@@ -19,12 +21,12 @@ const (
 )
 
 type Player struct {
-	ID          string `json:"id"`
-	Username    string `json:"username"`
-	Role        string `json:"role"` // CIVILIAN or IMPOSTOR
-	IsHost      bool   `json:"isHost"`
-	IsEliminated bool  `json:"isEliminated"`
-	IsAlive     bool   `json:"isAlive"`
+	ID           string `json:"id"`
+	Username     string `json:"username"`
+	Role         string `json:"role"` // CIVILIAN or IMPOSTOR
+	IsHost       bool   `json:"isHost"`
+	IsEliminated bool   `json:"isEliminated"`
+	IsAlive      bool   `json:"isAlive"`
 }
 
 type Task struct {
@@ -36,6 +38,7 @@ type Task struct {
 type Room struct {
 	ID         string
 	clients    map[*Client]bool
+	yjsClients map[*websocket.Conn]bool // Store Yjs connections
 	players    map[string]*Player
 	broadcast  chan []byte
 	phase      GamePhase
@@ -43,16 +46,20 @@ type Room struct {
 	mode       string // DSA or OOPS
 	task       *Task
 	gameTimer  *time.Timer
+	voteTimer  *time.Timer
+	votes      map[string]string // VoterID -> TargetID
 	mu         sync.RWMutex
 }
 
 func newRoom(id string) *Room {
 	return &Room{
-		ID:        id,
-		clients:   make(map[*Client]bool),
-		players:   make(map[string]*Player),
-		broadcast: make(chan []byte, 256),
-		phase:     PhaseLobby,
+		ID:         id,
+		clients:    make(map[*Client]bool),
+		yjsClients: make(map[*websocket.Conn]bool),
+		players:    make(map[string]*Player),
+		broadcast:  make(chan []byte, 256),
+		phase:      PhaseLobby,
+		votes:      make(map[string]string),
 	}
 }
 
@@ -81,11 +88,11 @@ func (r *Room) addPlayer(playerID, username string) {
 	isHost := len(r.players) == 0
 
 	r.players[playerID] = &Player{
-		ID:          playerID,
-		Username:    username,
-		IsHost:      isHost,
+		ID:           playerID,
+		Username:     username,
+		IsHost:       isHost,
 		IsEliminated: false,
-		IsAlive:     true,
+		IsAlive:      true,
 	}
 
 	log.Printf("Player %s (%s) added to room %s", username, playerID, r.ID)
@@ -105,7 +112,7 @@ func (r *Room) startGame() {
 	for id := range r.players {
 		playerIDs = append(playerIDs, id)
 	}
-	
+
 	rand.Seed(time.Now().UnixNano())
 	impostorIdx := rand.Intn(len(playerIDs))
 	r.impostorID = playerIDs[impostorIdx]
@@ -123,12 +130,10 @@ func (r *Room) startGame() {
 	modes := []string{"DSA", "OOPS"}
 	r.mode = modes[rand.Intn(len(modes))]
 
-	// Load task (simplified - in production would load from MongoDB)
+	// Load task
 	r.task = r.loadTask()
 
 	r.phase = PhaseRoleReveal
-
-	// Broadcast game started
 	r.broadcastGameState()
 
 	// Schedule role reveal end
@@ -139,13 +144,199 @@ func (r *Room) startGame() {
 		r.mu.Unlock()
 		r.broadcastGameState()
 
-		// Start game timer (10 minutes)
-		r.gameTimer = time.NewTimer(10 * time.Minute)
+		// Start game timer (45 Seconds) - Issue #2
+		if r.gameTimer != nil {
+			r.gameTimer.Stop()
+		}
+		r.gameTimer = time.NewTimer(45 * time.Second)
 		go func() {
 			<-r.gameTimer.C
 			r.endGame("IMPOSTOR_WIN_TIME")
 		}()
 	}()
+}
+
+func (r *Room) startDiscussion() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Stop the coding timer
+	if r.gameTimer != nil {
+		r.gameTimer.Stop()
+	}
+
+	r.phase = PhaseDiscussion
+	r.votes = make(map[string]string) // Reset votes
+	r.broadcastGameState()
+
+	// Start 10 Second Voting Timer - Issue #4
+	if r.voteTimer != nil {
+		r.voteTimer.Stop()
+	}
+	r.voteTimer = time.NewTimer(10 * time.Second)
+	go func() {
+		<-r.voteTimer.C
+		r.finalizeVoting()
+	}()
+}
+
+func (r *Room) handleVote(voterID, targetID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.phase != PhaseDiscussion {
+		return
+	}
+
+	// Check if voter is valid and alive
+	if p, ok := r.players[voterID]; !ok || p.IsEliminated {
+		return
+	}
+
+	r.votes[voterID] = targetID
+
+	// Broadcast that a vote happened (send full vote map so frontend knows counts)
+	voteMsg := Message{
+		Type: "VOTE_UPDATE",
+		Data: r.votes,
+	}
+	data, _ := json.Marshal(voteMsg)
+	r.broadcast <- data
+
+	// Check if everyone alive has voted
+	aliveCount := 0
+	for _, p := range r.players {
+		if !p.IsEliminated {
+			aliveCount++
+		}
+	}
+
+	if len(r.votes) >= aliveCount {
+		if r.voteTimer != nil {
+			r.voteTimer.Stop()
+		}
+		go r.finalizeVoting()
+	}
+}
+
+func (r *Room) finalizeVoting() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.phase != PhaseDiscussion {
+		return
+	}
+
+	// Tally votes
+	tally := make(map[string]int)
+	for _, target := range r.votes {
+		tally[target]++
+	}
+
+	var maxVotes int
+	var candidate string
+	var tie bool
+
+	// Find the candidate with max votes
+	for target, count := range tally {
+		if count > maxVotes {
+			maxVotes = count
+			candidate = target
+			tie = false
+		} else if count == maxVotes {
+			tie = true
+		}
+	}
+
+	// Decision Logic: Issue #4
+	var eliminatedID string
+	if !tie && candidate != "SKIP" && maxVotes > 0 {
+		if player, exists := r.players[candidate]; exists {
+			player.IsEliminated = true
+			player.IsAlive = false
+			eliminatedID = candidate
+
+			// Check if Impostor was ejected
+			if candidate == r.impostorID {
+				r.phase = PhaseEnd
+				r.broadcastGameState()
+				go r.endGame("CIVILIAN_WIN")
+				return
+			}
+		}
+	}
+
+	// Check if impostor wins by numbers (Impostors >= Crewmates)
+	impostorAlive := false
+	crewAlive := 0
+	for _, p := range r.players {
+		if !p.IsEliminated {
+			if p.Role == "IMPOSTOR" {
+				impostorAlive = true
+			} else {
+				crewAlive++
+			}
+		}
+	}
+
+	if !impostorAlive {
+		go r.endGame("CIVILIAN_WIN")
+		return
+	}
+	if impostorAlive && crewAlive == 0 {
+		go r.endGame("IMPOSTOR_WIN")
+		return
+	}
+
+	// Send Result and Resume Game
+	resultMsg := Message{
+		Type: "VOTE_RESULT",
+		Data: map[string]interface{}{
+			"tally":      tally,
+			"eliminated": eliminatedID,
+		},
+	}
+	data, _ := json.Marshal(resultMsg)
+	r.broadcast <- data
+
+	// Wait 3 seconds then resume coding
+	go func() {
+		time.Sleep(3 * time.Second)
+		r.mu.Lock()
+		if r.phase != PhaseEnd {
+			r.phase = PhaseCoding
+			// Restart 45s timer for next round
+			if r.gameTimer != nil {
+				r.gameTimer.Stop()
+			}
+			r.gameTimer = time.NewTimer(45 * time.Second)
+			go func() {
+				<-r.gameTimer.C
+				r.endGame("IMPOSTOR_WIN_TIME")
+			}()
+			r.broadcastGameState()
+		}
+		r.mu.Unlock()
+	}()
+}
+
+func (r *Room) endGame(reason string) {
+	// If lock is already held by caller (like finalizeVoting), we need careful handling.
+	// But simple endGame calls usually come from Timer or explicit checks.
+	// We'll assume endGame is called as a separate goroutine or when lock is available.
+	// NOTE: If called from inside a locked function, do not lock again.
+	// For safety in this snippet, we assume it's called independently.
+	
+	r.phase = PhaseEnd
+	msg := Message{
+		Type: "GAME_ENDED",
+		Data: map[string]interface{}{
+			"reason":     reason,
+			"impostorID": r.impostorID,
+		},
+	}
+	data, _ := json.Marshal(msg)
+	r.broadcast <- data
 }
 
 func (r *Room) loadTask() *Task {
@@ -159,19 +350,15 @@ func (r *Room) loadTask() *Task {
   constructor() {
     // Initialize counter
   }
-
   increment() {
     // Increment counter
   }
-
   decrement() {
     // Decrement counter
   }
-
   reset() {
     // Reset counter to 0
   }
-
   getValue() {
     // Return current value
   }
@@ -186,19 +373,15 @@ func (r *Room) loadTask() *Task {
   constructor() {
     // Initialize stack
   }
-
   push(element) {
     // Add element to top
   }
-
   pop() {
     // Remove and return top element
   }
-
   peek() {
     // Return top element without removing
   }
-
   isEmpty() {
     // Check if stack is empty
   }
@@ -220,94 +403,55 @@ func (r *Room) loadTask() *Task {
 	}
 }
 
-func (r *Room) eliminatePlayer(playerID string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if player, exists := r.players[playerID]; exists {
-		player.IsEliminated = true
-		player.IsAlive = false
-
-		// Check if impostor was eliminated
-		if playerID == r.impostorID {
-			r.phase = PhaseEnd
-			r.broadcastGameState()
-			go r.endGame("CIVILIAN_WIN")
-			return
-		}
-
-		// Check if all civilians eliminated
-		aliveCivilians := 0
-		for _, p := range r.players {
-			if p.IsAlive && p.Role == "CIVILIAN" {
-				aliveCivilians++
-			}
-		}
-
-		if aliveCivilians == 0 {
-			r.phase = PhaseEnd
-			go r.endGame("IMPOSTOR_WIN")
-			return
-		}
-
-		// Continue game
-		r.phase = PhaseCoding
-		r.broadcastGameState()
-	}
-}
-
-func (r *Room) endGame(reason string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	r.phase = PhaseEnd
-	
-	msg := Message{
-		Type: "GAME_ENDED",
-		Data: map[string]interface{}{
-			"reason":     reason,
-			"impostorID": r.impostorID,
-		},
-	}
-
-	data, _ := json.Marshal(msg)
-	r.broadcast <- data
-}
-
 func (r *Room) broadcastGameState() {
 	state := map[string]interface{}{
 		"phase":   r.phase,
 		"players": r.players,
 		"mode":    r.mode,
 	}
-
 	if r.task != nil {
 		state["task"] = r.task
 	}
-
-	msg := Message{
-		Type: "GAME_STATE",
-		Data: state,
-	}
-
+	msg := Message{Type: "GAME_STATE", Data: state}
 	data, _ := json.Marshal(msg)
 	r.broadcast <- data
 }
 
 func (r *Room) broadcastPlayerList() {
-	msg := Message{
-		Type: "PLAYER_LIST",
-		Data: r.players,
-	}
-
+	msg := Message{Type: "PLAYER_LIST", Data: r.players}
 	data, _ := json.Marshal(msg)
 	r.broadcast <- data
 }
 
-func (r *Room) startDiscussion() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+// Yjs Binary Relay (Fix for Issue #3)
+func (h *Hub) handleYjsConnection(w http.ResponseWriter, r *http.Request, conn *websocket.Conn) {
+	roomID := r.URL.Query().Get("room")
+	room := h.getRoom(roomID)
+	if room != nil {
+		room.mu.Lock()
+		room.yjsClients[conn] = true
+		room.mu.Unlock()
 
-	r.phase = PhaseDiscussion
-	r.broadcastGameState()
+		defer func() {
+			room.mu.Lock()
+			delete(room.yjsClients, conn)
+			room.mu.Unlock()
+			conn.Close()
+		}()
+
+		for {
+			messageType, message, err := conn.ReadMessage()
+			if err != nil {
+				break
+			}
+			// Broadcast raw binary to other Yjs clients in this room
+			room.mu.RLock()
+			for client := range room.yjsClients {
+				if client != conn {
+					client.WriteMessage(messageType, message)
+				}
+			}
+			room.mu.RUnlock()
+		}
+	}
 }

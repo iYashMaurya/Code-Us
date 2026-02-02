@@ -15,6 +15,7 @@ const initialState = {
   // Room info
   roomId: null,
   players: {},
+  votes: {},
   
   // Game state
   phase: 'LOBBY',
@@ -41,6 +42,11 @@ function gameReducer(state, action) {
     case 'SET_USERNAME':
       localStorage.setItem('username', action.payload);
       return { ...state, username: action.payload };
+
+    case 'UPDATE_VOTES':
+        return { ...state, votes: action.payload };
+
+    
     
     case 'SET_LANGUAGE':
       localStorage.setItem('language', action.payload);
@@ -53,7 +59,10 @@ function gameReducer(state, action) {
       return { ...state, players: action.payload };
     
     case 'SET_PHASE':
-      return { ...state, phase: action.payload };
+        if (action.payload === 'DISCUSSION') {
+            return { ...state, phase: action.payload, votes: {} };
+        }
+        return { ...state, phase: action.payload };
     
     case 'SET_ROLE':
       return { ...state, role: action.payload };

@@ -14,7 +14,7 @@ const (
 	writeWait      = 10 * time.Second
 	pongWait       = 60 * time.Second
 	pingPeriod     = (pongWait * 9) / 10
-	maxMessageSize = 512000 // 500KB for CRDT messages
+	maxMessageSize = 512000 // 500KB
 )
 
 var upgrader = websocket.Upgrader{
@@ -40,6 +40,7 @@ type Message struct {
 	From string      `json:"from,omitempty"`
 }
 
+// serveWs handles game logic connections (JSON)
 func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -79,6 +80,18 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 
 	go client.writePump()
 	go client.readPump()
+}
+
+// serveYjs handles collaborative editing connections (Binary)
+func serveYjs(hub *Hub, w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	// Helper to handle raw binary stream for Yjs
+	hub.handleYjsConnection(w, r, conn)
 }
 
 func (c *Client) readPump() {
@@ -192,10 +205,6 @@ func (c *Client) handleMessage(message []byte) {
 			room.startGame()
 		}
 
-	case "CRDT_UPDATE":
-		// Relay CRDT updates to all clients
-		room.broadcast <- message
-
 	case "CHAT":
 		// Check if player is eliminated
 		room.mu.RLock()
@@ -209,27 +218,13 @@ func (c *Client) handleMessage(message []byte) {
 	case "EMERGENCY":
 		room.startDiscussion()
 
-	case "ELIMINATE":
+	case "VOTE":
+		// Handle voting logic
 		if data, ok := msg.Data.(map[string]interface{}); ok {
-			if targetID, ok := data["playerID"].(string); ok {
-				room.eliminatePlayer(targetID)
+			if targetID, ok := data["targetID"].(string); ok {
+				room.handleVote(c.PlayerID, targetID)
 			}
 		}
-
-	case "YTEXT_UPDATE":
-		// Binary Yjs updates - relay to all other clients
-		room.mu.RLock()
-		for client := range room.clients {
-			if client != c {
-				select {
-				case client.send <- message:
-				default:
-					close(client.send)
-					delete(room.clients, client)
-				}
-			}
-		}
-		room.mu.RUnlock()
 
 	default:
 		log.Printf("Unknown message type: %s", msg.Type)

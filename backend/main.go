@@ -7,33 +7,6 @@ import (
 	"github.com/gorilla/mux"
 )
 
-// var upgrader = websocket.Upgrader{
-// 	ReadBufferSize:  1024,
-// 	WriteBufferSize: 1024,
-// 	CheckOrigin: func(r *http.Request) bool {
-// 		return true
-// 	},
-// }
-
-// func serveYjs(hub *Hub, w http.ResponseWriter, r *http.Request) {
-// 	conn, err := upgrader.Upgrade(w, r, nil)
-// 	if err != nil {
-// 		log.Println(err)
-// 		return
-// 	}
-// 	// Simplified binary relay for Yjs
-// 	// In a real app, you'd use a dedicated Yjs structure, 
-//     // but for this MVP, we broadcast raw binary to the specific room's Yjs group
-// 	roomID := r.URL.Path // extracting room ID from path handled in router
-//     // Note: For simplicity in this snippets, we assume the Yjs client connects and we just relay 
-//     // binary messages to everyone else connected to the same room/socket. 
-//     // See the 'Room' struct update below for the implementation.
-    
-//     // NOTE: To properly fix Issue 3 (Cursors), we are routing Yjs traffic 
-//     // through a dedicated relay in the Room struct (see room.go changes).
-//     hub.handleYjsConnection(w, r, conn)
-// }
-
 func main() {
 	hub := newHub()
 	go hub.run()
@@ -54,8 +27,14 @@ func main() {
 		})
 	})
 
+	// Game logic WebSocket (JSON messages)
 	r.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		serveWs(hub, w, r)
+	})
+
+	// Yjs collaborative editing WebSocket (Binary messages)
+	r.HandleFunc("/yjs", func(w http.ResponseWriter, r *http.Request) {
+		serveYjs(hub, w, r)
 	})
 
 	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {

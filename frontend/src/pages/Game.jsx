@@ -26,6 +26,12 @@ export default function Game() {
     const handleMessage = (event) => {
       try {
         const message = JSON.parse(event.data);
+
+        // --- NEW: Handle Vote Updates ---
+        if (message.type === 'VOTE_UPDATE') {
+           dispatch({ type: 'UPDATE_VOTES', payload: message.data });
+        }
+
         if (message.type === 'GAME_ENDED') {
           setEndReason(message.data.reason);
           setEndImpostorId(message.data.impostorID);
@@ -39,7 +45,7 @@ export default function Game() {
     return () => {
       state.ws?.removeEventListener('message', handleMessage);
     };
-  }, [state.ws]);
+  }, [state.ws, dispatch]);
 
   const handleStartGame = () => {
     sendMessage('START_GAME', {});
@@ -49,12 +55,10 @@ export default function Game() {
     sendMessage('EMERGENCY', {});
   };
 
-  const handleEliminate = (playerId) => {
-    if (playerId) {
-      sendMessage('ELIMINATE', { playerID: playerId });
-    } else {
-      sendMessage('ELIMINATE', { playerID: null });
-    }
+  // --- CHANGED: Voting Logic ---
+  const handleVote = (targetId) => {
+      // Sends "VOTE" message with targetID (player ID) or "SKIP"
+      sendMessage('VOTE', { targetID: targetId });
   };
 
   if (!connected) {
@@ -80,7 +84,8 @@ export default function Game() {
         return <CodeEditor onEmergency={handleEmergency} />;
       
       case 'DISCUSSION':
-        return <Discussion onEliminate={handleEliminate} />;
+        // --- CHANGED: Passing handleVote instead of handleEliminate ---
+        return <Discussion onVote={handleVote} />;
       
       case 'END':
         return <EndGame reason={endReason} impostorId={endImpostorId} />;

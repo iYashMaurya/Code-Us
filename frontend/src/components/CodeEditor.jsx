@@ -2,10 +2,10 @@ import React, { useEffect, useRef, useState } from 'react';
 import Editor from '@monaco-editor/react';
 import { useGame } from '../context/GameContext';
 import { useTranslation } from '../utils/translations';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 import Starfield from './Starfield';
 import Ship, { getShipType } from './Ship';
-import { CheckCircle2, XCircle, Zap, Radio } from 'lucide-react';
+import { CheckCircle2, XCircle, Zap, Radio, Clock } from 'lucide-react';
 import * as Y from 'yjs';
 import { WebsocketProvider } from 'y-websocket';
 import { MonacoBinding } from 'y-monaco';
@@ -19,12 +19,34 @@ export default function CodeEditor({ onEmergency }) {
   const [provider, setProvider] = useState(null);
   const [testResults, setTestResults] = useState([false, false, false]);
   const [sabotages, setSabotages] = useState({ oxygen: false, sensors: false });
+  const [timeLeft, setTimeLeft] = useState(45);
+  const [isTestRunning, setIsTestRunning] = useState(false);
   const chatEndRef = useRef(null);
+  const monacoBindingRef = useRef(null);
 
   const playerList = Object.values(state.players || {});
   const alivePlayers = playerList.filter(p => p.isAlive);
   const eliminatedPlayers = playerList.filter(p => p.isEliminated);
   const isImpostor = state.role === 'IMPOSTOR';
+
+  // Timer countdown
+  useEffect(() => {
+    if (state.phase === 'CODING') {
+      const timer = setInterval(() => {
+        setTimeLeft((prev) => {
+          if (prev <= 1) {
+            clearInterval(timer);
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+
+      return () => clearInterval(timer);
+    } else {
+      setTimeLeft(45);
+    }
+  }, [state.phase]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -32,6 +54,11 @@ export default function CodeEditor({ onEmergency }) {
 
   useEffect(() => {
     if (!state.roomId || !editorRef.current) return;
+
+    if (monacoBindingRef.current) {
+      monacoBindingRef.current.destroy();
+      monacoBindingRef.current = null;
+    }
 
     const doc = new Y.Doc();
     const wsProvider = new WebsocketProvider(
@@ -44,17 +71,26 @@ export default function CodeEditor({ onEmergency }) {
     setProvider(wsProvider);
 
     const yText = doc.getText('monaco');
-    
+    const model = editorRef.current.getModel();
+    if (!model) return;
+
     if (state.task?.template && yText.toString() === '') {
       yText.insert(0, state.task.template);
     }
 
     const binding = new MonacoBinding(
       yText,
-      editorRef.current.getModel(),
+      model,
       new Set([editorRef.current]),
       wsProvider.awareness
     );
+
+    monacoBindingRef.current = binding;
+
+    wsProvider.awareness.setLocalStateField('user', {
+      name: state.username,
+      color: getPlayerColor(playerList.findIndex(p => p.id === state.playerId)),
+    });
 
     if (state.isEliminated) {
       wsProvider.disconnect();
@@ -63,11 +99,14 @@ export default function CodeEditor({ onEmergency }) {
     }
 
     return () => {
-      binding.destroy();
+      if (monacoBindingRef.current) {
+        monacoBindingRef.current.destroy();
+        monacoBindingRef.current = null;
+      }
       wsProvider.disconnect();
       doc.destroy();
     };
-  }, [state.roomId, state.task, editorRef.current]);
+  }, [state.roomId, state.task?.template, state.playerId, state.username]);
 
   useEffect(() => {
     if (state.isEliminated && editorRef.current) {
@@ -81,6 +120,9 @@ export default function CodeEditor({ onEmergency }) {
 
   const handleEditorDidMount = (editor) => {
     editorRef.current = editor;
+    setTimeout(() => {
+      editor.focus();
+    }, 100);
   };
 
   const handleSendMessage = () => {
@@ -102,12 +144,44 @@ export default function CodeEditor({ onEmergency }) {
   const handleSabotage = (type) => {
     if (!isImpostor) return;
     setSabotages(prev => ({ ...prev, [type]: !prev[type] }));
-    // In real implementation, would send sabotage event to backend
   };
 
   const mockTestValidation = () => {
-    // Simple mock validation - in real game would use regex/actual test runner
-    setTestResults([true, Math.random() > 0.5, false]);
+    if (isTestRunning) return;
+    setIsTestRunning(true);
+
+    const code = editorRef.current?.getValue() || '';
+    
+    const results = [
+      code.includes('constructor') && code.includes('this'),
+      code.includes('push') || code.includes('pop') || code.includes('increment'),
+      code.length > 100,
+    ];
+
+    setTimeout(() => {
+      setTestResults(results);
+      setIsTestRunning(false);
+
+      if (results.every(r => r)) {
+        if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+          state.ws.send(JSON.stringify({
+            type: 'TASK_COMPLETED',
+            data: { playerId: state.playerId }
+          }));
+        }
+      }
+    }, 1000);
+  };
+
+  const getPlayerColor = (index) => {
+    const colors = ['#ff6b6b', '#6ba3ff', '#6ee06e', '#ffb366', '#a78bfa'];
+    return colors[index % colors.length];
+  };
+
+  const formatTime = (seconds) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
   return (
@@ -115,7 +189,6 @@ export default function CodeEditor({ onEmergency }) {
       <Starfield />
       
       <div className="relative z-10 p-4">
-        {/* Top Bar */}
         <div className="flex justify-between items-center mb-4">
           <div className="flex gap-4 items-center">
             <div className="panel-space-sm px-4 py-2">
@@ -123,6 +196,19 @@ export default function CodeEditor({ onEmergency }) {
                 {t('game.mode')}: {state.mode}
               </span>
             </div>
+
+            <motion.div
+              className={`panel-space-sm px-4 py-2 flex items-center gap-2 ${
+                timeLeft < 10 ? 'bg-red-500' : 'bg-orange'
+              }`}
+              animate={timeLeft < 10 ? { scale: [1, 1.05, 1] } : {}}
+              transition={{ duration: 0.5, repeat: timeLeft < 10 ? Infinity : 0 }}
+            >
+              <Clock className="w-5 h-5" />
+              <span className="font-pixel text-sm text-white">
+                {formatTime(timeLeft)}
+              </span>
+            </motion.div>
             
             {state.isEliminated && (
               <motion.div
@@ -148,12 +234,9 @@ export default function CodeEditor({ onEmergency }) {
           </motion.button>
         </div>
 
-        {/* Main Grid */}
         <div className="grid grid-cols-4 gap-4 h-[calc(100vh-120px)]">
-          {/* Left Panel - System Diagnostics / Sabotage */}
           <div className="col-span-1 flex flex-col gap-4">
             {isImpostor ? (
-              /* Impostor Sabotage Panel */
               <motion.div
                 className="panel-space flex-1"
                 initial={{ x: -50, opacity: 0 }}
@@ -177,7 +260,6 @@ export default function CodeEditor({ onEmergency }) {
                   </button>
                 </div>
                 
-                {/* Fake Tests */}
                 <div className="mt-6">
                   <h4 className="font-game text-xl mb-2 text-gray-700">Fake Tests</h4>
                   <div className="space-y-2">
@@ -191,7 +273,6 @@ export default function CodeEditor({ onEmergency }) {
                 </div>
               </motion.div>
             ) : (
-              /* Civilian Test Cases */
               <motion.div
                 className="panel-space flex-1"
                 initial={{ x: -50, opacity: 0 }}
@@ -219,14 +300,14 @@ export default function CodeEditor({ onEmergency }) {
                 
                 <button
                   onClick={mockTestValidation}
-                  className="btn-space green w-full mt-4 text-sm"
+                  disabled={isTestRunning}
+                  className={`btn-space green w-full mt-4 text-sm ${isTestRunning ? 'opacity-50' : ''}`}
                 >
-                  Run Tests
+                  {isTestRunning ? 'Running...' : 'Run Tests'}
                 </button>
               </motion.div>
             )}
 
-            {/* Players List */}
             <div className="panel-space flex-shrink-0">
               <h3 className="font-pixel text-sm mb-3 text-gray-900">{t('game.players')}</h3>
               
@@ -259,9 +340,7 @@ export default function CodeEditor({ onEmergency }) {
             </div>
           </div>
 
-          {/* Center - Editor */}
           <div className="col-span-3 flex flex-col gap-4">
-            {/* Task Description */}
             <motion.div
               className="panel-space"
               initial={{ y: -50, opacity: 0 }}
@@ -273,23 +352,23 @@ export default function CodeEditor({ onEmergency }) {
               </p>
             </motion.div>
 
-            {/* Monaco Editor */}
             <div className="flex-1 border-4 border-brown-dark overflow-hidden shadow-pixel">
               <Editor
                 height="100%"
                 defaultLanguage="javascript"
                 theme="vs-dark"
+                defaultValue={state.task?.template || ''}
                 onMount={handleEditorDidMount}
                 options={{
                   minimap: { enabled: false },
                   fontSize: 16,
                   readOnly: state.isEliminated,
                   fontFamily: 'Consolas, monospace',
+                  automaticLayout: true,
                 }}
               />
             </div>
 
-            {/* Chat */}
             <div className="panel-space h-64 flex flex-col">
               <h3 className="font-pixel text-sm mb-3 text-gray-900">{t('game.chat')}</h3>
               

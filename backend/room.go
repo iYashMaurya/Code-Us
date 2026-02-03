@@ -421,7 +421,7 @@ func (r *Room) broadcastPlayerList() {
 func (h *Hub) handleYjsConnection(w http.ResponseWriter, r *http.Request, conn *websocket.Conn) {
 	roomID := r.URL.Query().Get("room")
 	room := h.getRoom(roomID)
-	
+
 	if room == nil {
 		log.Printf("Room %s not found for Yjs connection", roomID)
 		conn.Close()

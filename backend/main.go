@@ -29,11 +29,13 @@ func main() {
 
 	// Game logic WebSocket (JSON messages)
 	r.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("📞 Game WebSocket connection attempt from %s", r.RemoteAddr)
 		serveWs(hub, w, r)
 	})
 
-	// Yjs collaborative editing WebSocket (Binary messages)
+	// Yjs collaborative editing WebSocket (Binary messages) - THIS WAS MISSING!
 	r.HandleFunc("/yjs", func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("🔗 Yjs WebSocket connection attempt from %s", r.RemoteAddr)
 		serveYjs(hub, w, r)
 	})
 
@@ -43,5 +45,7 @@ func main() {
 	})
 
 	log.Println("🚀 Server starting on :8080")
+	log.Println("📡 Game WebSocket endpoint: ws://localhost:8080/ws")
+	log.Println("🔗 Yjs WebSocket endpoint: ws://localhost:8080/yjs")
 	log.Fatal(http.ListenAndServe(":8080", r))
 }

@@ -14,14 +14,14 @@ const (
 	writeWait      = 10 * time.Second
 	pongWait       = 60 * time.Second
 	pingPeriod     = (pongWait * 9) / 10
-	maxMessageSize = 512000 // 500KB
+	maxMessageSize = 512 * 1024
 )
 
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 	CheckOrigin: func(r *http.Request) bool {
-		return true // Allow all origins in development
+		return true
 	},
 }
 
@@ -37,10 +37,8 @@ type Client struct {
 type Message struct {
 	Type string      `json:"type"`
 	Data interface{} `json:"data"`
-	From string      `json:"from,omitempty"`
 }
 
-// serveWs handles game logic connections (JSON)
 func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -48,14 +46,8 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	roomID := r.URL.Query().Get("room")
-	if roomID == "" {
-		log.Println("No room ID provided")
-		conn.Close()
-		return
-	}
-
 	playerID := uuid.New().String()
+	roomID := r.URL.Query().Get("room")
 
 	client := &Client{
 		hub:      hub,
@@ -67,10 +59,10 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 
 	client.hub.register <- client
 
-	// Send player ID to client
+	// CRITICAL: Send INIT message to client immediately after registration
 	initMsg := Message{
 		Type: "INIT",
-		Data: map[string]string{
+		Data: map[string]interface{}{
 			"playerID": playerID,
 			"roomID":   roomID,
 		},
@@ -78,19 +70,19 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	initData, _ := json.Marshal(initMsg)
 	client.send <- initData
 
+	log.Printf("Client %s initialized for room %s", playerID, roomID)
+
 	go client.writePump()
 	go client.readPump()
 }
 
-// serveYjs handles collaborative editing connections (Binary)
 func serveYjs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println(err)
+		log.Printf("Yjs WebSocket upgrade error: %v", err)
 		return
 	}
 
-	// Helper to handle raw binary stream for Yjs
 	hub.handleYjsConnection(w, r, conn)
 }
 
@@ -150,7 +142,6 @@ func (c *Client) writePump() {
 			if err := w.Close(); err != nil {
 				return
 			}
-
 		case <-ticker.C:
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
@@ -167,8 +158,6 @@ func (c *Client) handleMessage(message []byte) {
 		return
 	}
 
-	msg.From = c.PlayerID
-
 	room := c.hub.getRoom(c.RoomID)
 	if room == nil {
 		log.Printf("Room %s not found", c.RoomID)
@@ -177,27 +166,31 @@ func (c *Client) handleMessage(message []byte) {
 
 	switch msg.Type {
 	case "JOIN":
-		if data, ok := msg.Data.(map[string]interface{}); ok {
-			if username, ok := data["username"].(string); ok {
-				c.Username = username
-				room.addPlayer(c.PlayerID, username)
-				
-				// First broadcast the updated player list to ALL clients (including this one)
-				room.broadcastPlayerList()
-				
-				// Then send the SELF message to this specific client
-				room.mu.RLock()
-				player := room.players[c.PlayerID]
-				room.mu.RUnlock()
+		data, ok := msg.Data.(map[string]interface{})
+		if !ok {
+			return
+		}
 
-				selfMsg := Message{
-					Type: "SELF",
-					Data: player,
-				}
+		username, _ := data["username"].(string)
+		c.Username = username
 
-				payload, _ := json.Marshal(selfMsg)
-				c.send <- payload
+		room.addPlayer(c.PlayerID, username)
+
+		// Broadcast player list FIRST to all clients
+		room.broadcastPlayerList()
+
+		// Then send SELF message to joining client
+		room.mu.RLock()
+		player := room.players[c.PlayerID]
+		room.mu.RUnlock()
+
+		if player != nil {
+			selfMsg := Message{
+				Type: "SELF",
+				Data: player,
 			}
+			payload, _ := json.Marshal(selfMsg)
+			c.send <- payload
 		}
 
 	case "START_GAME":
@@ -209,8 +202,16 @@ func (c *Client) handleMessage(message []byte) {
 			room.startGame()
 		}
 
+	case "RUN_TESTS":
+		data, ok := msg.Data.(map[string]interface{})
+		if !ok {
+			return
+		}
+
+		code, _ := data["code"].(string)
+		room.handleRunTests(c.PlayerID, code)
+
 	case "CHAT":
-		// Check if player is eliminated
 		room.mu.RLock()
 		player := room.players[c.PlayerID]
 		room.mu.RUnlock()
@@ -223,12 +224,13 @@ func (c *Client) handleMessage(message []byte) {
 		room.startDiscussion()
 
 	case "VOTE":
-		// Handle voting logic
-		if data, ok := msg.Data.(map[string]interface{}); ok {
-			if targetID, ok := data["targetID"].(string); ok {
-				room.handleVote(c.PlayerID, targetID)
-			}
+		data, ok := msg.Data.(map[string]interface{})
+		if !ok {
+			return
 		}
+
+		targetID, _ := data["targetID"].(string)
+		room.handleVote(c.PlayerID, targetID)
 
 	default:
 		log.Printf("Unknown message type: %s", msg.Type)

@@ -1,194 +1,174 @@
-import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React from 'react';
 import { useGame } from '../context/GameContext';
-import { useTranslation } from '../utils/translations';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 import Starfield from './Starfield';
 import Ship, { getShipType } from './Ship';
 
-export default function EndGame({ reason, impostorId }) {
-  const navigate = useNavigate();
-  const { state, dispatch } = useGame();
-  const { t } = useTranslation(state.language);
-  const [phase, setPhase] = useState('ejection'); // ejection, result
+export default function EndGame({ reason, IMPOSTERId }) {
+  const { state } = useGame();
+  
+  const getWinMessage = (reason) => {
+  switch (reason) {
+    case 'CIVILIAN_WIN_TESTS':
+      return {
+        title: '🛰️ MISSION SUCCESS',
+        subtitle: 'All satellite bugs have been fixed!',
+        message: 'The crewmates saved the mission by completing all tasks!',
+        color: 'green'
+      };
+    
+    case 'CIVILIAN_WIN':
+      return {
+        title: '🎉 CREWMATES WIN',
+        subtitle: 'IMPOSTER has been eliminated!',
+        message: 'The crew successfully identified and voted out the IMPOSTER!',
+        color: 'green'
+      };
+    
+    case 'IMPOSTER_WIN':
+      return {
+        title: '💀 IMPOSTER WINS',
+        subtitle: 'All crewmates eliminated!',
+        message: 'The IMPOSTER has sabotaged the mission!',
+        color: 'red'
+      };
+    
+    case 'IMPOSTER_WIN_TIME':
+      return {
+        title: '⏰ TIME\'S UP',
+        subtitle: 'IMPOSTER wins!',
+        message: 'The crew ran out of time to fix the satellite!',
+        color: 'red'
+      };
+    
+    default:
+      return {
+        title: 'GAME OVER',
+        subtitle: '',
+        message: 'The game has ended.',
+        color: 'gray'
+      };
+  }
+};
 
-  const civilianWin = reason?.includes('CIVILIAN');
-  const impostor = state.players?.[impostorId];
-  const allPlayers = Object.values(state.players || {});
-  const impostorIndex = allPlayers.findIndex(p => p.id === impostorId);
+  const winInfo = getWinMessage(reason);
+  const playerList = Object.values(state.players || {});
+  const IMPOSTER = playerList.find(p => p.id === IMPOSTERId);
 
-  useEffect(() => {
-    // Show ejection for 3.5 seconds, then show results
-    const timer = setTimeout(() => {
-      setPhase('result');
-    }, 3500);
-
-    return () => clearTimeout(timer);
-  }, []);
-
-  const handlePlayAgain = () => {
-    dispatch({ type: 'RESET' });
-    navigate('/');
+  const getColorClasses = (color) => {
+    const classes = {
+      green: 'text-green-400 bg-green-900',
+      red: 'text-red-400 bg-red-900',
+      gray: 'text-gray-400 bg-gray-900'
+    };
+    return classes[color] || classes.gray;
   };
 
   return (
-    <div className="min-h-screen relative overflow-hidden">
+    <div className="min-h-screen relative flex items-center justify-center p-4">
       <Starfield />
-
+      
       {/* Colored Overlay */}
-      <motion.div
-        className={`absolute inset-0 z-0 ${civilianWin ? 'bg-green-900' : 'bg-red-900'}`}
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 0.3 }}
-        transition={{ duration: 1 }}
-      />
+      <div className={`absolute inset-0 ${getColorClasses(winInfo.color).split(' ')[1]} opacity-30 z-0`}></div>
+      
+      <div className="text-center relative z-10 max-w-4xl">
+        {/* Title */}
+        <motion.h1
+          className={`font-pixel text-6xl mb-4 ${getColorClasses(winInfo.color).split(' ')[0]}`}
+          initial={{ scale: 0.5, opacity: 0 }}
+          animate={{ 
+            scale: [0.5, 1.1, 1],
+            opacity: 1,
+          }}
+          transition={{ duration: 1 }}
+          style={{
+            textShadow: winInfo.color === 'green' 
+              ? '0 0 20px #4ade80, 0 0 40px #22c55e' 
+              : '0 0 20px #ef4444, 0 0 40px #dc2626'
+          }}
+        >
+          {winInfo.title}
+        </motion.h1>
 
-      <div className="relative z-10 min-h-screen flex flex-col items-center justify-center p-4">
-        {/* Ejection Phase */}
-        <AnimatePresence mode="wait">
-          {phase === 'ejection' && (
-            <motion.div
-              key="ejection"
-              className="absolute inset-0 flex items-center justify-center"
-              exit={{ opacity: 0 }}
-            >
-              {/* Flying Ship */}
-              <motion.div
-                className="absolute"
-                initial={{ x: -200, y: '40%', rotate: 0, opacity: 0 }}
-                animate={{
-                  x: [null, window.innerWidth / 2 - 100, window.innerWidth + 200],
-                  rotate: civilianWin ? [0, 360, 720] : [0, 180, 360],
-                  opacity: [0, 1, 1, 0.5],
-                }}
-                transition={{ duration: 3.5, ease: 'easeInOut' }}
-              >
-                <div className="relative">
-                  <Ship 
-                    type={getShipType(impostorIndex >= 0 ? impostorIndex : 0)} 
-                    size="xl" 
-                  />
-                  
-                  {/* Explosion Effect for Impostor */}
-                  {civilianWin && (
-                    <motion.div
-                      className="absolute inset-0 flex items-center justify-center"
-                      initial={{ scale: 0, opacity: 0 }}
-                      animate={{ scale: [0, 3, 5], opacity: [0, 1, 0] }}
-                      transition={{ delay: 1.5, duration: 1 }}
-                    >
-                      <div className="relative w-48 h-48">
-                        {[...Array(12)].map((_, i) => (
-                          <motion.div
-                            key={i}
-                            className="absolute w-6 h-6 bg-orange rounded-full"
-                            style={{
-                              top: '50%',
-                              left: '50%',
-                              marginTop: '-12px',
-                              marginLeft: '-12px',
-                            }}
-                            animate={{
-                              x: Math.cos((i * Math.PI) / 6) * 80,
-                              y: Math.sin((i * Math.PI) / 6) * 80,
-                              opacity: [1, 0],
-                              scale: [1, 0.5],
-                            }}
-                            transition={{ duration: 0.8 }}
-                          />
-                        ))}
-                      </div>
-                    </motion.div>
-                  )}
-                </div>
-              </motion.div>
+        {/* Subtitle */}
+        {winInfo.subtitle && (
+          <motion.h2
+            className="font-game text-3xl mb-8 text-white"
+            initial={{ y: -20, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            transition={{ delay: 0.3 }}
+          >
+            {winInfo.subtitle}
+          </motion.h2>
+        )}
 
-              {/* Ejection Text */}
-              <motion.div
-                className="text-center"
-                initial={{ opacity: 0, y: -50 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.5 }}
-              >
-                <h1 className="font-pixel text-5xl text-white mb-4">
-                  {impostor?.username || 'Unknown'} WAS EJECTED
-                </h1>
-              </motion.div>
-            </motion.div>
+        {/* Message Panel */}
+        <motion.div
+          initial={{ y: 50, opacity: 0 }}
+          animate={{ y: 0, opacity: 1 }}
+          transition={{ delay: 0.5, duration: 0.8 }}
+          className="panel-space max-w-2xl mx-auto mb-8"
+        >
+          <p className="font-game text-2xl text-gray-900 mb-6">
+            {winInfo.message}
+          </p>
+
+          {/* Reveal IMPOSTER */}
+          {IMPOSTER && (
+            <div className="mt-6 p-4 bg-red-100 border-3 border-red-500">
+              <p className="font-pixel text-sm mb-2 text-red-600">THE IMPOSTER WAS:</p>
+              <div className="flex items-center justify-center gap-3">
+                <Ship type={getShipType(playerList.indexOf(IMPOSTER))} size="lg" />
+                <span className="font-game text-3xl text-gray-900">
+                  {IMPOSTER.username}
+                </span>
+              </div>
+            </div>
           )}
+        </motion.div>
 
-          {/* Result Phase */}
-          {phase === 'result' && (
-            <motion.div
-              key="result"
-              className="w-full max-w-4xl"
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
-            >
-              {/* Result Title */}
-              <motion.h1
-                className={`font-pixel text-6xl mb-8 text-center ${civilianWin ? 'text-green-400' : 'text-red-500'}`}
-                initial={{ scale: 0 }}
-                animate={{ scale: 1 }}
-                transition={{ type: 'spring', duration: 0.6 }}
-                style={{
-                  textShadow: civilianWin 
-                    ? '0 0 30px #4ade80, 0 0 60px #22c55e' 
-                    : '0 0 30px #ef4444, 0 0 60px #dc2626'
-                }}
+        {/* Players Summary */}
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ delay: 1 }}
+          className="panel-space max-w-xl mx-auto"
+        >
+          <h3 className="font-pixel text-lg mb-4 text-gray-900">FINAL ROSTER</h3>
+          <div className="grid grid-cols-2 gap-3">
+            {playerList.map((player, index) => (
+              <div 
+                key={player.id}
+                className={`flex items-center gap-2 p-2 border-2 ${
+                  player.isEliminated ? 'border-gray-400 opacity-50' : 'border-brown-dark'
+                } bg-white/50`}
               >
-                {civilianWin ? t('end.civilianWin') : t('end.impostorWin')}
-              </motion.h1>
-
-              {/* Impostor Reveal */}
-              <motion.div
-                className="panel-space max-w-2xl mx-auto mb-12"
-                initial={{ y: 50, opacity: 0 }}
-                animate={{ y: 0, opacity: 1 }}
-                transition={{ delay: 0.3 }}
-              >
-                <p className="font-game text-3xl mb-6 text-gray-900 text-center">
-                  {t('end.impostor')}:
-                </p>
-                
-                <div className="flex items-center justify-center gap-4 bg-red-500 border-4 border-brown-dark px-8 py-6 shadow-pixel">
-                  <Ship 
-                    type={getShipType(impostorIndex >= 0 ? impostorIndex : 0)} 
-                    size="xl" 
-                  />
-                  <span className="font-pixel text-4xl text-white">
-                    {impostor?.username || 'Unknown'}
-                  </span>
+                <Ship type={getShipType(index)} size="sm" />
+                <div className="text-left flex-1">
+                  <p className={`font-game text-lg ${player.isEliminated ? 'line-through' : ''}`}>
+                    {player.username}
+                  </p>
+                  <p className={`font-pixel text-xs ${
+                    player.role === 'IMPOSTER' ? 'text-red-600' : 'text-green-600'
+                  }`}>
+                    {player.role}
+                  </p>
                 </div>
-              </motion.div>
+              </div>
+            ))}
+          </div>
+        </motion.div>
 
-              {/* Actions */}
-              <motion.div
-                className="flex gap-4 justify-center"
-                initial={{ y: 50, opacity: 0 }}
-                animate={{ y: 0, opacity: 1 }}
-                transition={{ delay: 0.6 }}
-              >
-                <motion.button
-                  onClick={handlePlayAgain}
-                  className="btn-space green"
-                  whileHover={{ scale: 1.05 }}
-                  whileTap={{ scale: 0.95 }}
-                >
-                  {t('end.playAgain')}
-                </motion.button>
-                <motion.button
-                  onClick={() => navigate('/')}
-                  className="btn-space blue"
-                  whileHover={{ scale: 1.05 }}
-                  whileTap={{ scale: 0.95 }}
-                >
-                  {t('end.home')}
-                </motion.button>
-              </motion.div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+        {/* Return Home Button */}
+        <motion.button
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ delay: 1.5 }}
+          onClick={() => window.location.href = '/'}
+          className="btn-space green mt-8"
+        >
+          Return to Lobby
+        </motion.button>
       </div>
     </div>
   );

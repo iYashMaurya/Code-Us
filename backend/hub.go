@@ -1,4 +1,5 @@
 package main
+
 import (
 	"encoding/json"
 	"log"
@@ -47,7 +48,30 @@ func (h *Hub) run() {
 					// Get player info before removing
 					room.mu.RLock()
 					player := room.players[client.PlayerID]
+					wasTestRunner := room.testRunning && room.testRunner == client.PlayerID
 					room.mu.RUnlock()
+					
+					// CRITICAL: If disconnected player was running tests, unlock immediately
+					if wasTestRunner {
+						room.mu.Lock()
+						room.testRunning = false
+						room.testRunner = ""
+						room.testRunnerName = ""
+						room.codeSnapshot = ""
+						room.mu.Unlock()
+						
+						// Broadcast that tests were cancelled
+						cancelMsg := Message{
+							Type: "TEST_CANCELLED",
+							Data: map[string]interface{}{
+								"reason": player.Username + " disconnected during test execution",
+							},
+						}
+						msgData, _ := json.Marshal(cancelMsg)
+						room.broadcast <- msgData
+						
+						log.Printf("⚠️ Test runner %s disconnected, unlocking room", player.Username)
+					}
 					
 					// Remove player
 					delete(room.players, client.PlayerID)

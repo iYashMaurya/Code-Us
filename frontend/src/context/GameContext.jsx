@@ -24,6 +24,17 @@ const initialState = {
   mode: null,
   task: null,
   
+  // Test Execution State (NEW)
+  isTerminalBusy: false,      // Global lock for test execution
+  currentRunner: null,         // Username of player running tests
+  currentRunnerID: null,       // ID of player running tests
+  terminalLogs: [],            // Terminal output lines
+  testProgress: {              // Individual test status
+    task1: false,
+    task2: false,
+    task3: false,
+  },
+  
   // UI state
   messages: [],
 };
@@ -44,9 +55,7 @@ function gameReducer(state, action) {
       return { ...state, username: action.payload };
 
     case 'UPDATE_VOTES':
-        return { ...state, votes: action.payload };
-
-    
+      return { ...state, votes: action.payload };
     
     case 'SET_LANGUAGE':
       localStorage.setItem('language', action.payload);
@@ -59,10 +68,10 @@ function gameReducer(state, action) {
       return { ...state, players: action.payload };
     
     case 'SET_PHASE':
-        if (action.payload === 'DISCUSSION') {
-            return { ...state, phase: action.payload, votes: {} };
-        }
-        return { ...state, phase: action.payload };
+      if (action.payload === 'DISCUSSION') {
+        return { ...state, phase: action.payload, votes: {} };
+      }
+      return { ...state, phase: action.payload };
     
     case 'SET_ROLE':
       return { ...state, role: action.payload };
@@ -71,7 +80,7 @@ function gameReducer(state, action) {
       return { ...state, isEliminated: action.payload };
     
     case 'SET_GAME_STATE':
-      const { phase, players, mode, task } = action.payload;
+      const { phase, players, mode, task, testRunning, testRunner } = action.payload;
       const currentPlayer = players?.[state.playerId];
       return {
         ...state,
@@ -81,7 +90,65 @@ function gameReducer(state, action) {
         task: task || state.task,
         role: currentPlayer?.role || state.role,
         isEliminated: currentPlayer?.isEliminated || state.isEliminated,
+        isTerminalBusy: testRunning || false,
+        currentRunner: testRunner || null,
       };
+    
+    // NEW: Test execution actions
+    case 'TEST_LOCKED':
+      return {
+        ...state,
+        isTerminalBusy: true,
+        currentRunner: action.payload.runner,
+        currentRunnerID: action.payload.runnerID,
+        terminalLogs: [
+          ...state.terminalLogs,
+          `🔒 ${action.payload.runner} is running system diagnostics...`,
+        ],
+      };
+    
+    case 'TEST_COMPLETE':
+      const results = action.payload.results || [false, false, false];
+      return {
+        ...state,
+        isTerminalBusy: false,
+        currentRunner: null,
+        currentRunnerID: null,
+        testProgress: {
+          task1: results[0],
+          task2: results[1],
+          task3: results[2],
+        },
+        terminalLogs: [
+          ...state.terminalLogs,
+          ...(action.payload.logs || []),
+        ],
+      };
+    
+    case 'TEST_CANCELLED':
+      return {
+        ...state,
+        isTerminalBusy: false,
+        currentRunner: null,
+        currentRunnerID: null,
+        terminalLogs: [
+          ...state.terminalLogs,
+          `⚠️ Test cancelled: ${action.payload.reason}`,
+        ],
+      };
+    
+    case 'ERROR_BUSY':
+      return {
+        ...state,
+        terminalLogs: [
+          ...state.terminalLogs,
+          `❌ ${action.payload.message}`,
+          `⏳ ${action.payload.runner} is currently running tests...`,
+        ],
+      };
+    
+    case 'CLEAR_TERMINAL':
+      return { ...state, terminalLogs: [] };
     
     case 'ADD_MESSAGE':
       return {

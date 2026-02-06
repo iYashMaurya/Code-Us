@@ -1,15 +1,18 @@
+'use i18n';
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useGame } from '../context/GameContext';
-import { useTranslation } from '../utils/translations';
+// import { useTranslation } from '../utils/translations';
 import { motion } from 'framer-motion';
 import Starfield from '../components/Starfield';
+import { useLingoContext } from '@lingo.dev/compiler/react';
 
 export default function Home() {
   const navigate = useNavigate();
   const { state, dispatch } = useGame();
-  const { t } = useTranslation(state.language);
+  // const { t } = useTranslation(state.language);
   const [roomInput, setRoomInput] = useState('');
+  const { setLocale } = useLingoContext();
 
   const handleCreateRoom = () => {
     if (!state.username.trim()) {
@@ -35,8 +38,14 @@ export default function Home() {
     navigate(`/room/${roomInput.toUpperCase()}`);
   };
 
-  const handleLanguageChange = (e) => {
-    dispatch({ type: 'SET_LANGUAGE', payload: e.target.value });
+ const handleLanguageChange = (e) => {
+    const newLang = e.target.value;
+    
+    // Update your game state (for the dropdown UI)
+    dispatch({ type: 'SET_LANGUAGE', payload: newLang });
+    
+    // Update Lingo (to swap the text)
+    setLocale(newLang); // <--- 3. ADD THIS LINE
   };
 
   return (
@@ -58,114 +67,51 @@ export default function Home() {
 
       {/* Main Content */}
       <div className="flex flex-col items-center justify-center min-h-screen py-12 px-4 relative z-10">
-        {/* Title with Gradient and Glow */}
-        <motion.div
-          className="mb-12 text-center"
-          initial={{ y: -100, opacity: 0 }}
-          animate={{ y: 0, opacity: 1 }}
-          transition={{ duration: 0.8, type: 'spring' }}
-        >
-          <motion.h1
-            className="font-pixel text-6xl mb-4"
-            animate={{
-              textShadow: [
-                '0 0 20px #ff9933, 0 0 40px #ffb366',
-                '0 0 30px #ff66b2, 0 0 50px #ff9933',
-                '0 0 20px #ff9933, 0 0 40px #ffb366',
-              ],
-            }}
-            transition={{ duration: 3, repeat: Infinity }}
-          >
-            <span 
-              className="text-pink-500"
-              style={{
-                background: 'linear-gradient(45deg, #ec4899, #f97316)',
-                WebkitBackgroundClip: 'text',
-                WebkitTextFillColor: 'transparent',
-              }}
-            >
-              {t('home.title').split(' ')[0]}
+        <motion.div className="mb-12 text-center">
+          <motion.h1 className="font-pixel text-6xl mb-4">
+            {/* LINGO MAGIC: Just write the text. Lingo will translate the whole block */}
+            <span className="text-pink-500" style={{ background: 'linear-gradient(45deg, #ec4899, #f97316)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
+              CODE
             </span>
             <br />
-            <span 
-              className="text-orange"
-              style={{
-                background: 'linear-gradient(45deg, #f97316, #fb923c)',
-                WebkitBackgroundClip: 'text',
-                WebkitTextFillColor: 'transparent',
-              }}
-            >
-              {t('home.title').split(' ')[1]}
+            <span className="text-orange" style={{ background: 'linear-gradient(45deg, #f97316, #fb923c)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
+              MAFIA
             </span>
           </motion.h1>
-          <motion.p
-            className="font-game text-3xl text-white"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ delay: 0.5 }}
-            style={{ textShadow: '2px 2px 4px rgba(0,0,0,0.8)' }}
-          >
-            {t('home.subtitle')}
+          <motion.p className="font-game text-3xl text-white">
+            A Collaborative Coding Game
           </motion.p>
         </motion.div>
 
-        {/* Input Panel */}
-        <motion.div
-          className="panel-space w-full max-w-md space-y-6"
-          initial={{ scale: 0.8, opacity: 0 }}
-          animate={{ scale: 1, opacity: 1 }}
-          transition={{ delay: 0.3, duration: 0.5 }}
-        >
-          {/* Username */}
+        <motion.div className="panel-space w-full max-w-md space-y-6">
           <input
             type="text"
-            placeholder={t('home.username')}
+            placeholder="Enter Username"
             value={state.username}
             onChange={(e) => dispatch({ type: 'SET_USERNAME', payload: e.target.value })}
             className="input-space w-full"
-            maxLength={20}
           />
 
-          {/* Create Room */}
-          <motion.button
-            onClick={handleCreateRoom}
-            className="btn-space w-full"
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.98 }}
-          >
-            {t('home.createRoom')}
+          <motion.button onClick={handleCreateRoom} className="btn-space w-full">
+            Create Room
           </motion.button>
 
-          {/* Join Room */}
           <div className="flex gap-3">
             <input
               type="text"
-              placeholder={t('home.joinRoom')}
+              placeholder="Room Code"
               value={roomInput}
               onChange={(e) => setRoomInput(e.target.value.toUpperCase())}
               className="input-space flex-1"
-              maxLength={8}
             />
-            <motion.button
-              onClick={handleJoinRoom}
-              className="btn-space green"
-              whileHover={{ scale: 1.02 }}
-              whileTap={{ scale: 0.98 }}
-            >
-              {t('home.join')}
+            <motion.button onClick={handleJoinRoom} className="btn-space green">
+              Join
             </motion.button>
           </div>
         </motion.div>
 
-        {/* Info */}
-        <motion.div
-          className="mt-8 font-game text-2xl text-white text-center"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ delay: 0.8 }}
-          style={{ textShadow: '2px 2px 4px rgba(0,0,0,0.8)' }}
-        >
-          {t('home.playerCount')}
+        <motion.div className="mt-8 font-game text-2xl text-white text-center">
+          3-5 Players Recommended
         </motion.div>
       </div>
     </div>

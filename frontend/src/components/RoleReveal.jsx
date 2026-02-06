@@ -1,12 +1,13 @@
+'use i18n';
 import React from 'react';
 import { useGame } from '../context/GameContext';
-import { useTranslation } from '../utils/translations';
+// import { useTranslation } from '../utils/translations';
 import { motion } from 'framer-motion';
 import Starfield from './Starfield';
 
 export default function RoleReveal() {
   const { state } = useGame();
-  const { t } = useTranslation(state.language);
+  // const { t } = useTranslation(state.language);
   
   const isCivilian = state.role === 'CIVILIAN';
 
@@ -33,7 +34,7 @@ export default function RoleReveal() {
               : '0 0 20px #ef4444, 0 0 40px #dc2626'
           }}
         >
-          {isCivilian ? t('role.civilian') : t('role.impostor')}
+          {isCivilian ? "CREWMATE" : "IMPOSTOR"}
         </motion.h1>
 
         {/* Description Panel */}
@@ -44,7 +45,7 @@ export default function RoleReveal() {
           className="panel-space max-w-2xl mx-auto"
         >
           <p className="font-game text-3xl leading-relaxed text-gray-900">
-            {isCivilian ? t('role.civilianDesc') : t('role.impostorDesc')}
+            {isCivilian ? "CREWMATE" : "IMPOSTOR" }
           </p>
         </motion.div>
 
@@ -56,7 +57,7 @@ export default function RoleReveal() {
           transition={{ delay: 1, duration: 0.5 }}
         >
           <p className="font-game text-2xl text-white mb-4">
-            {t('role.starting')}
+            Starting soon...
           </p>
           <div className="spinner-space mx-auto border-white border-t-orange"></div>
         </motion.div>

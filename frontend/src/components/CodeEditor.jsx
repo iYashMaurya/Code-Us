@@ -1,3 +1,5 @@
+// Add these to CodeEditor.jsx - Enhanced with Sabotage Support
+
 import React, { useEffect, useRef, useState } from 'react';
 import Editor from '@monaco-editor/react';
 import { useGame } from '../context/GameContext';
@@ -5,7 +7,7 @@ import { useTranslation } from '../utils/translations';
 import { motion, AnimatePresence } from 'framer-motion';
 import Starfield from './Starfield';
 import Ship, { getShipType } from './Ship';
-import { CheckCircle2, XCircle, Zap, Radio, Clock, Loader2, Terminal, AlertTriangle } from 'lucide-react';
+import { CheckCircle2, XCircle, Zap, Radio, Clock, Loader2, Terminal, AlertTriangle, Snowflake, Bug } from 'lucide-react';
 import * as Y from 'yjs';
 import { WebsocketProvider } from 'y-websocket';
 import { MonacoBinding } from 'y-monaco';
@@ -15,7 +17,6 @@ export default function CodeEditor({ onEmergency }) {
   const { t } = useTranslation(state.language);
   const editorRef = useRef(null);
   const [chatMessage, setChatMessage] = useState('');
-  const [sabotages, setSabotages] = useState({ oxygen: false, sensors: false });
   const chatEndRef = useRef(null);
   const terminalEndRef = useRef(null);
   
@@ -24,18 +25,21 @@ export default function CodeEditor({ onEmergency }) {
   const yjsBindingRef = useRef(null);
   const yjsDocRef = useRef(null);
 
+  // SABOTAGE STATE (NEW)
+  const [isFrozen, setIsFrozen] = useState(false);
+  const [sabotageType, setSabotageType] = useState(null);
+  const [freezeTimeLeft, setFreezeTimeLeft] = useState(0);
+
   const playerList = Object.values(state.players || {});
   const alivePlayers = playerList.filter(p => p.isAlive);
   const eliminatedPlayers = playerList.filter(p => p.isEliminated);
   const isImpostor = state.role === 'IMPOSTOR';
 
-  // Derived state
   const isTerminalBusy = state.isTerminalBusy;
   const currentRunner = state.currentRunner;
   const terminalLogs = state.terminalLogs;
   const isMyTest = state.currentRunnerID === state.playerId;
   
-  // Multi-stage state
   const currentStage = state.currentStage;
   const timerSeconds = state.timerSeconds;
   const tasksComplete = state.tasksComplete;
@@ -49,13 +53,82 @@ export default function CodeEditor({ onEmergency }) {
     terminalEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [terminalLogs]);
 
-  // FIX #5: Improved Yjs initialization with proper stage synchronization
+  // SABOTAGE LISTENER (NEW)
+  useEffect(() => {
+    if (!state.ws) return;
+
+    const handleSabotage = (event) => {
+      try {
+        const message = JSON.parse(event.data);
+
+        // FREEZE SABOTAGE
+        if (message.type === 'SABOTAGE_STARTED' && message.data.type === 'FREEZE') {
+          console.log('❄️ FREEZE sabotage activated!');
+          setIsFrozen(true);
+          setSabotageType('FREEZE');
+          
+          const duration = message.data.duration || 5000;
+          setFreezeTimeLeft(Math.floor(duration / 1000));
+          
+          // Countdown timer for visual feedback
+          const countdownInterval = setInterval(() => {
+            setFreezeTimeLeft(prev => {
+              if (prev <= 1) {
+                clearInterval(countdownInterval);
+                return 0;
+              }
+              return prev - 1;
+            });
+          }, 1000);
+          
+          // Auto-unfreeze after duration
+          setTimeout(() => {
+            setIsFrozen(false);
+            setSabotageType(null);
+            setFreezeTimeLeft(0);
+          }, duration);
+        }
+
+        // FREEZE END (backup in case of early end)
+        if (message.type === 'SABOTAGE_ENDED' && message.data.type === 'FREEZE') {
+          console.log('✅ FREEZE sabotage ended');
+          setIsFrozen(false);
+          setSabotageType(null);
+          setFreezeTimeLeft(0);
+        }
+
+        // CORRUPT SABOTAGE
+        if (message.type === 'SABOTAGE_CORRUPT') {
+          console.log('🦠 CORRUPT sabotage - injecting malware');
+          
+          const malware = message.data.malware;
+          
+          // Inject malware at top of code
+          if (editorRef.current) {
+            const currentCode = editorRef.current.getValue();
+            const newCode = malware + currentCode;
+            editorRef.current.setValue(newCode);
+          }
+          
+          // Flash red effect
+          setSabotageType('CORRUPT');
+          setTimeout(() => setSabotageType(null), 2000);
+        }
+      } catch (error) {
+        console.error('Error handling sabotage:', error);
+      }
+    };
+
+    state.ws.addEventListener('message', handleSabotage);
+    return () => state.ws?.removeEventListener('message', handleSabotage);
+  }, [state.ws]);
+
+  // Yjs initialization (same as before)
   useEffect(() => {
     if (!state.roomId || !editorReady || !editorRef.current || !state.task) {
       return;
     }
 
-    // Clean up previous Yjs connection
     if (yjsProviderRef.current) {
       console.log('🧹 Cleaning up previous Yjs connection');
       if (yjsBindingRef.current) {
@@ -78,7 +151,6 @@ export default function CodeEditor({ onEmergency }) {
     const doc = new Y.Doc();
     yjsDocRef.current = doc;
     
-    // Use stage-specific room ID for Yjs
     const yjsRoomId = `${state.roomId}-stage${currentStage}`;
     const wsUrl = 'ws://localhost:8080/yjs';
     
@@ -95,7 +167,6 @@ export default function CodeEditor({ onEmergency }) {
 
     const yText = doc.getText('monaco');
     
-    // FIX #5: Use provider.on('sync') to ensure proper initialization
     let templateLoaded = false;
     
     provider.on('sync', (isSynced) => {
@@ -106,7 +177,6 @@ export default function CodeEditor({ onEmergency }) {
       }
     });
     
-    // Also handle case where we're first to connect (immediate sync)
     setTimeout(() => {
       if (!templateLoaded && yText.toString() === '') {
         console.log('📝 Setting initial template (first connection) for Stage', currentStage);
@@ -160,18 +230,17 @@ export default function CodeEditor({ onEmergency }) {
     };
   }, [state.roomId, editorReady, state.task?.id, currentStage, state.playerId, state.username]);
 
+  // Update editor read-only state based on elimination AND freeze
   useEffect(() => {
     if (!editorRef.current) return;
 
-    if (state.isEliminated) {
-      editorRef.current.updateOptions({ readOnly: true });
-      if (yjsProviderRef.current) {
-        yjsProviderRef.current.awareness.setLocalState(null);
-      }
-    } else {
-      editorRef.current.updateOptions({ readOnly: false });
+    const shouldBeReadOnly = state.isEliminated || isFrozen;
+    editorRef.current.updateOptions({ readOnly: shouldBeReadOnly });
+    
+    if (state.isEliminated && yjsProviderRef.current) {
+      yjsProviderRef.current.awareness.setLocalState(null);
     }
-  }, [state.isEliminated]);
+  }, [state.isEliminated, isFrozen]);
 
   const handleEditorDidMount = (editor) => {
     console.log('🎯 Monaco editor mounted');
@@ -201,13 +270,22 @@ export default function CodeEditor({ onEmergency }) {
     }
   };
 
+  // SABOTAGE HANDLERS (NEW)
   const handleSabotage = (type) => {
     if (!isImpostor) return;
-    setSabotages(prev => ({ ...prev, [type]: !prev[type] }));
+    
+    console.log('💀 Activating sabotage:', type);
+    
+    if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+      state.ws.send(JSON.stringify({
+        type: 'SABOTAGE',
+        data: { type }
+      }));
+    }
   };
 
   const handleRunTests = () => {
-    if (isTerminalBusy || state.isEliminated) return;
+    if (isTerminalBusy || state.isEliminated || isFrozen) return;
 
     const code = editorRef.current?.getValue() || '';
     
@@ -244,7 +322,51 @@ export default function CodeEditor({ onEmergency }) {
     <div className="min-h-screen relative">
       <Starfield />
       
-      {/* Top Banner - Shows when someone else is running tests */}
+      {/* FREEZE SABOTAGE OVERLAY (NEW) */}
+      <AnimatePresence>
+        {isFrozen && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 pointer-events-none"
+            style={{
+              background: 'radial-gradient(circle, rgba(59, 130, 246, 0.3) 0%, rgba(29, 78, 216, 0.5) 100%)',
+            }}
+          >
+            <div className="flex items-center justify-center h-full">
+              <motion.div
+                animate={{ scale: [1, 1.1, 1], rotate: [0, 5, -5, 0] }}
+                transition={{ duration: 0.5, repeat: Infinity }}
+                className="text-center"
+              >
+                <Snowflake className="w-32 h-32 text-blue-200 mx-auto mb-4" />
+                <h1 className="font-pixel text-6xl text-white mb-4" style={{ textShadow: '0 0 20px #60a5fa' }}>
+                  SYSTEM JAMMED
+                </h1>
+                <p className="font-game text-3xl text-blue-200">
+                  Unfreezing in {freezeTimeLeft}s...
+                </p>
+              </motion.div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* CORRUPT FLASH (NEW) */}
+      <AnimatePresence>
+        {sabotageType === 'CORRUPT' && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: [0, 0.7, 0] }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.5 }}
+            className="fixed inset-0 z-40 pointer-events-none bg-red-600"
+          />
+        )}
+      </AnimatePresence>
+      
+      {/* Top Banner */}
       <AnimatePresence>
         {isTerminalBusy && !isMyTest && (
           <motion.div
@@ -264,9 +386,9 @@ export default function CodeEditor({ onEmergency }) {
       </AnimatePresence>
       
       <div className="relative z-10 p-4">
+        {/* Header with Timer and Controls - same as before */}
         <div className="flex justify-between items-center mb-4">
           <div className="flex gap-4 items-center">
-            {/* Stage Indicator */}
             <div className="panel-space-sm px-6 py-3">
               <div className="flex items-center gap-3">
                 <span className="font-pixel text-xl text-gray-900">
@@ -289,58 +411,38 @@ export default function CodeEditor({ onEmergency }) {
               </div>
             </div>
 
-            {/* Timer */}
+            {/* Timer with better visibility */}
             <motion.div
-  className="panel-space-sm px-6 py-3 flex items-center gap-3"
-  style={{
-    backgroundColor: timerSeconds < 20 
-      ? '#dc2626'  // Bright red for urgency
-      : timerSeconds < 40 
-        ? '#ea580c'  // Bright orange for warning
-        : '#16a34a', // Bright green for safe
-    borderColor: '#3E2723',
-    borderWidth: '4px',
-    boxShadow: timerSeconds < 20 
-      ? '0 0 20px rgba(220, 38, 38, 0.6), 0 4px 0 rgba(0,0,0,0.8)'
-      : '0 4px 0 rgba(0,0,0,0.8)',
-  }}
-  animate={timerSeconds < 20 ? { 
-    scale: [1, 1.05, 1],
-    boxShadow: [
-      '0 0 20px rgba(220, 38, 38, 0.6), 0 4px 0 rgba(0,0,0,0.8)',
-      '0 0 30px rgba(220, 38, 38, 0.9), 0 4px 0 rgba(0,0,0,0.8)',
-      '0 0 20px rgba(220, 38, 38, 0.6), 0 4px 0 rgba(0,0,0,0.8)',
-    ]
-  } : {}}
-  transition={{ duration: 0.5, repeat: timerSeconds < 20 ? Infinity : 0 }}
->
-  <Clock className="w-6 h-6 text-white drop-shadow-lg" />
-  <span 
-    className="font-pixel text-2xl font-bold"
-    style={{ 
-      color: '#FFFFFF',
-      textShadow: '3px 3px 6px rgba(0,0,0,0.9), 0 0 10px rgba(0,0,0,0.5)',
-      letterSpacing: '0.05em'
-    }}
-  >
-    {formatTime(timerSeconds)}
-  </span>
-  {timerSeconds < 20 && (
-    <motion.div
-      animate={{ 
-        rotate: [0, 10, -10, 10, 0],
-        scale: [1, 1.2, 1]
-      }}
-      transition={{ 
-        duration: 0.5, 
-        repeat: Infinity,
-        repeatDelay: 0.2
-      }}
-    >
-      <AlertTriangle className="w-6 h-6 text-yellow-300 drop-shadow-lg" />
-    </motion.div>
-  )}
-</motion.div>
+              className="panel-space-sm px-6 py-3 flex items-center gap-3"
+              style={{
+                backgroundColor: timerSeconds < 20 
+                  ? '#dc2626' 
+                  : timerSeconds < 40 
+                    ? '#ea580c' 
+                    : '#16a34a',
+                borderColor: '#3E2723',
+                borderWidth: '4px',
+                boxShadow: timerSeconds < 20 
+                  ? '0 0 20px rgba(220, 38, 38, 0.6), 0 4px 0 rgba(0,0,0,0.8)'
+                  : '0 4px 0 rgba(0,0,0,0.8)',
+              }}
+              animate={timerSeconds < 20 ? { scale: [1, 1.05, 1] } : {}}
+              transition={{ duration: 0.5, repeat: timerSeconds < 20 ? Infinity : 0 }}
+            >
+              <Clock className="w-6 h-6 text-white drop-shadow-lg" />
+              <span 
+                className="font-pixel text-2xl font-bold"
+                style={{ 
+                  color: '#FFFFFF',
+                  textShadow: '3px 3px 6px rgba(0,0,0,0.9)',
+                }}
+              >
+                {formatTime(timerSeconds)}
+              </span>
+              {timerSeconds < 20 && (
+                <AlertTriangle className="w-6 h-6 text-yellow-300 animate-pulse" />
+              )}
+            </motion.div>
             
             {state.isEliminated && (
               <motion.div
@@ -368,6 +470,7 @@ export default function CodeEditor({ onEmergency }) {
 
         <div className="grid grid-cols-4 gap-4 h-[calc(100vh-120px)]">
           <div className="col-span-1 flex flex-col gap-4">
+            {/* IMPOSTOR SABOTAGE PANEL (ENHANCED) */}
             {isImpostor ? (
               <motion.div
                 className="panel-space flex-1"
@@ -377,22 +480,35 @@ export default function CodeEditor({ onEmergency }) {
                 <h3 className="font-pixel text-lg mb-4 text-red-600">SABOTAGE</h3>
                 <div className="space-y-3">
                   <button
-                    onClick={() => handleSabotage('oxygen')}
-                    className={`w-full btn-space red text-sm ${sabotages.oxygen ? 'bg-red-700' : ''}`}
+                    onClick={() => handleSabotage('FREEZE')}
+                    disabled={isFrozen}
+                    className={`w-full btn-space red text-sm flex items-center justify-center gap-2 ${
+                      isFrozen ? 'opacity-50 cursor-not-allowed' : ''
+                    }`}
                   >
-                    <Zap className="inline w-4 h-4 mr-2" />
-                    Cut Oxygen
+                    <Snowflake className="w-4 h-4" />
+                    Jam Comms (5s)
                   </button>
                   <button
-                    onClick={() => handleSabotage('sensors')}
-                    className={`w-full btn-space red text-sm ${sabotages.sensors ? 'bg-red-700' : ''}`}
+                    onClick={() => handleSabotage('CORRUPT')}
+                    className="w-full btn-space red text-sm flex items-center justify-center gap-2"
                   >
-                    <Radio className="inline w-4 h-4 mr-2" />
-                    Jam Sensors
+                    <Bug className="w-4 h-4" />
+                    Inject Malware
                   </button>
+                </div>
+                
+                <div className="mt-4 p-3 bg-red-100 border-2 border-red-500 rounded">
+                  <p className="font-pixel text-xs text-red-800 mb-2">IMPOSTOR TIPS:</p>
+                  <p className="font-game text-sm text-gray-800">
+                    • Jam: Freezes typing for 5s
+                    <br />
+                    • Corrupt: Adds code errors
+                  </p>
                 </div>
               </motion.div>
             ) : (
+              /* CIVILIAN PANEL - same as before */
               <motion.div
                 className="panel-space flex-1"
                 initial={{ x: -50, opacity: 0 }}
@@ -404,15 +520,20 @@ export default function CodeEditor({ onEmergency }) {
                 
                 <button
                   onClick={handleRunTests}
-                  disabled={isTerminalBusy || state.isEliminated}
+                  disabled={isTerminalBusy || state.isEliminated || isFrozen}
                   className={`btn-space green w-full text-sm flex items-center justify-center gap-2 ${
-                    isTerminalBusy || state.isEliminated ? 'opacity-50 cursor-not-allowed' : ''
+                    isTerminalBusy || state.isEliminated || isFrozen ? 'opacity-50 cursor-not-allowed' : ''
                   }`}
                 >
                   {isTerminalBusy ? (
                     <>
                       <Loader2 className="w-4 h-4 animate-spin" />
                       {isMyTest ? 'Testing...' : `${currentRunner} testing...`}
+                    </>
+                  ) : isFrozen ? (
+                    <>
+                      <Snowflake className="w-4 h-4" />
+                      Systems Frozen
                     </>
                   ) : (
                     <>
@@ -438,13 +559,13 @@ export default function CodeEditor({ onEmergency }) {
               </motion.div>
             )}
 
-            {/* Players List */}
+            {/* Players List - same as before */}
             <div className="panel-space flex-shrink-0">
               <h3 className="font-pixel text-sm mb-3 text-gray-900">PLAYERS</h3>
               
               <div className="space-y-2">
                 <p className="font-game text-lg text-green-600">ALIVE</p>
-                {alivePlayers.map((player, index) => (
+                {alivePlayers.map((player) => (
                   <div key={player.id} className="flex items-center gap-2">
                     <Ship type={getShipType(playerList.indexOf(player))} size="sm" />
                     <span className="font-game text-sm text-gray-900">
@@ -458,7 +579,7 @@ export default function CodeEditor({ onEmergency }) {
               {eliminatedPlayers.length > 0 && (
                 <div className="space-y-2 mt-4">
                   <p className="font-game text-lg text-red-600">ELIMINATED</p>
-                  {eliminatedPlayers.map((player, index) => (
+                  {eliminatedPlayers.map((player) => (
                     <div key={player.id} className="flex items-center gap-2 opacity-50">
                       <Ship type={getShipType(playerList.indexOf(player))} size="sm" />
                       <span className="font-game text-sm line-through text-gray-600">
@@ -477,7 +598,7 @@ export default function CodeEditor({ onEmergency }) {
               className="panel-space"
               initial={{ y: -50, opacity: 0 }}
               animate={{ y: 0, opacity: 1 }}
-              key={state.task?.id} // Re-animate when task changes
+              key={state.task?.id}
             >
               <h3 className="font-pixel text-xl mb-2 text-gray-900">
                 {state.task?.title || 'Loading...'}
@@ -487,10 +608,19 @@ export default function CodeEditor({ onEmergency }) {
               </p>
             </motion.div>
 
-            {/* Code Editor */}
-            <div className="flex-1 border-4 border-brown-dark overflow-hidden shadow-pixel">
+            {/* Code Editor with freeze overlay */}
+            <div className="flex-1 border-4 border-brown-dark overflow-hidden shadow-pixel relative">
+              {isFrozen && (
+                <div className="absolute inset-0 z-10 bg-blue-900 bg-opacity-50 flex items-center justify-center">
+                  <div className="text-center">
+                    <Snowflake className="w-16 h-16 text-blue-200 mx-auto animate-spin" />
+                    <p className="font-pixel text-white mt-4">FROZEN</p>
+                  </div>
+                </div>
+              )}
+              
               <Editor
-                key={state.task?.id} // Force remount when task changes
+                key={state.task?.id}
                 height="100%"
                 defaultLanguage="java"
                 theme="vs-dark"
@@ -499,14 +629,14 @@ export default function CodeEditor({ onEmergency }) {
                 options={{
                   minimap: { enabled: false },
                   fontSize: 14,
-                  readOnly: state.isEliminated,
+                  readOnly: state.isEliminated || isFrozen,
                   fontFamily: 'Consolas, monospace',
                   automaticLayout: true,
                 }}
               />
             </div>
 
-            {/* Chat */}
+            {/* Chat - same as before */}
             <div className="panel-space h-48 flex flex-col">
               <h3 className="font-pixel text-sm mb-3 text-gray-900">CHAT</h3>
               
@@ -537,10 +667,12 @@ export default function CodeEditor({ onEmergency }) {
                     onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
                     placeholder="Type..."
                     className="input-space flex-1 text-sm py-1"
+                    disabled={isFrozen}
                   />
                   <button
                     onClick={handleSendMessage}
-                    className="btn-space green text-xs px-4"
+                    disabled={isFrozen}
+                    className={`btn-space green text-xs px-4 ${isFrozen ? 'opacity-50 cursor-not-allowed' : ''}`}
                   >
                     SEND
                   </button>

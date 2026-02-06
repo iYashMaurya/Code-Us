@@ -1,3 +1,4 @@
+'use i18n';
 import React from 'react';
 import { useGame } from '../context/GameContext';
 import { motion } from 'framer-motion';

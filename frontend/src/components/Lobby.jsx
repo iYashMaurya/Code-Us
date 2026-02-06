@@ -1,13 +1,14 @@
+'use i18n';
 import React from 'react';
 import { useGame } from '../context/GameContext';
-import { useTranslation } from '../utils/translations';
+// import { useTranslation } from '../utils/translations';
 import { motion } from 'framer-motion';
 import Ship, { getShipType } from './Ship';
 import Starfield from './Starfield';
 
 export default function Lobby({ onStartGame }) {
   const { state } = useGame();
-  const { t } = useTranslation(state.language);
+  // const { t } = useTranslation(state.language);
   
   const playerList = Object.values(state.players || {});
   const currentPlayer = state.players?.[state.playerId];

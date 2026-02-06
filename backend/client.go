@@ -193,10 +193,19 @@ func (c *Client) handleMessage(message []byte) {
 			payload, _ := json.Marshal(selfMsg)
 			c.send <- payload
 		}
+	case "SABOTAGE":
+		data, ok := msg.Data.(map[string]interface{})
+		if !ok {
+			return
+		}
 
+		sabotageType, _ := data["type"].(string)
+		log.Printf("💀 SABOTAGE request: %s from %s", sabotageType, c.Username)
+
+		room.handleSabotage(c.PlayerID, sabotageType)
 	case "START_GAME":
 		// FIXED: Add comprehensive logging and explicit checks
-		log.Printf("🎮 START_GAME received from %s (PlayerID: %s, RoomID: %s)", 
+		log.Printf("🎮 START_GAME received from %s (PlayerID: %s, RoomID: %s)",
 			c.Username, c.PlayerID, c.RoomID)
 
 		room.mu.RLock()
@@ -205,7 +214,7 @@ func (c *Client) handleMessage(message []byte) {
 
 		if player == nil {
 			log.Printf("❌ START_GAME rejected: Player %s not found in room %s", c.PlayerID, c.RoomID)
-			
+
 			// Send error to client
 			errorMsg := Message{
 				Type: "ERROR",
@@ -220,7 +229,7 @@ func (c *Client) handleMessage(message []byte) {
 
 		if !player.IsHost {
 			log.Printf("❌ START_GAME rejected: Player %s (%s) is not host", player.Username, c.PlayerID)
-			
+
 			// Send error to client
 			errorMsg := Message{
 				Type: "ERROR",

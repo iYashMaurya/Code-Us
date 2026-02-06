@@ -1,0 +1,29 @@
+{
+  "version": 0.1,
+  "locale": "en",
+  "entries": {
+    "fe7eb53f4bf3": "🇬🇧 EN",
+    "6f7148737b84": "🇮🇳 HI",
+    "884f1826cc25": "🇩🇪 DE",
+    "ad68d60123b7": "CODE",
+    "362e6216a965": "MAFIA",
+    "58c3396a8ea4": "A Collaborative Coding Game",
+    "cf4065ac9bb7": "Enter Username",
+    "df0aa4860f39": "Create Room",
+    "9c30cb83300e": "Room Code",
+    "0390d4a5a2f4": "Join",
+    "4ecdcdb7b365": "3-5 Players Recommended",
+    "ae27f3ab8907": "{expression0} ({expression1}/5)",
+    "16a96db497a0": "Starting soon...",
+    "f56ff759c334": "VOTING ENDS IN",
+    "721866419cc4": "WHO IS THE IMPOSTOR?",
+    "293f4840f046": "SKIP",
+    "114861426f6e": "✅ Your vote has been recorded. Waiting for other players...",
+    "545a6895a002": "DISCUSSION",
+    "da1a01c8f5cb": "Discuss...",
+    "5486001727d5": "SEND",
+    "fb9050732b76": "THE IMPOSTOR WAS:",
+    "579fe2c149aa": "FINAL ROSTER",
+    "5e5405bfa3c8": "Return to Lobby"
+  }
+}

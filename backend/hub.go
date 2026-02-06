@@ -39,70 +39,194 @@ func (h *Hub) run() {
 			h.mu.Unlock()
 
 		case client := <-h.unregister:
-			h.mu.Lock()
-			if room, exists := h.rooms[client.RoomID]; exists {
-				if _, ok := room.clients[client]; ok {
-					delete(room.clients, client)
-					close(client.send)
-					
-					// Get player info before removing
-					room.mu.RLock()
-					player := room.players[client.PlayerID]
-					wasTestRunner := room.testRunning && room.testRunner == client.PlayerID
-					room.mu.RUnlock()
-					
-					// CRITICAL: If disconnected player was running tests, unlock immediately
-					if wasTestRunner {
-						room.mu.Lock()
-						room.testRunning = false
-						room.testRunner = ""
-						room.testRunnerName = ""
-						room.codeSnapshot = ""
-						room.mu.Unlock()
-						
-						// Broadcast that tests were cancelled
-						cancelMsg := Message{
-							Type: "TEST_CANCELLED",
-							Data: map[string]interface{}{
-								"reason": player.Username + " disconnected during test execution",
-							},
-						}
-						msgData, _ := json.Marshal(cancelMsg)
-						room.broadcast <- msgData
-						
-						log.Printf("⚠️ Test runner %s disconnected, unlocking room", player.Username)
-					}
-					
-					// Remove player
-					delete(room.players, client.PlayerID)
-					
-					// Broadcast disconnection message
-					if player != nil && player.Username != "" {
-						disconnectMsg := Message{
-							Type: "CHAT",
-							Data: map[string]interface{}{
-								"username": "System",
-								"text":     player.Username + " has disconnected",
-								"system":   true,
-							},
-						}
-						msgData, _ := json.Marshal(disconnectMsg)
-						room.broadcast <- msgData
-					}
-					
-					// Broadcast updated player list
-					room.broadcastPlayerList()
-					
-					// If room is empty, clean it up
-					if len(room.clients) == 0 {
-						delete(h.rooms, client.RoomID)
-						log.Printf("Room %s cleaned up", client.RoomID)
-					}
-				}
-			}
-			h.mu.Unlock()
+			h.handleDisconnect(client)
 		}
 	}
+}
+
+// ENHANCED: Game-aware disconnect handling with host migration
+func (h *Hub) handleDisconnect(client *Client) {
+	h.mu.Lock()
+	room, roomExists := h.rooms[client.RoomID]
+	h.mu.Unlock()
+	
+	if !roomExists {
+		log.Printf("⚠️ Client disconnected from non-existent room %s", client.RoomID)
+		return
+	}
+
+	room.mu.Lock()
+	
+	// Get player info before removing
+	player, playerExists := room.players[client.PlayerID]
+	if !playerExists {
+		room.mu.Unlock()
+		log.Printf("⚠️ Disconnected client had no player record")
+		return
+	}
+
+	playerName := player.Username
+	playerID := client.PlayerID
+	wasHost := player.IsHost
+	currentPhase := room.gameState.Phase
+	wasTestRunner := room.testRunning && room.testRunner == playerID
+	
+	log.Printf("💀 Player disconnecting: %s (ID: %s, Phase: %s, Host: %v)", 
+		playerName, playerID, currentPhase, wasHost)
+
+	// Remove from clients and players
+	delete(room.clients, client)
+	delete(room.players, playerID)
+	close(client.send)
+	
+	// CRITICAL: Cancel test if this player was running it
+	if wasTestRunner {
+		room.testRunning = false
+		room.testRunner = ""
+		room.testRunnerName = ""
+		room.codeSnapshot = ""
+		
+		cancelMsg := Message{
+			Type: "TEST_CANCELLED",
+			Data: map[string]interface{}{
+				"reason": playerName + " disconnected during test execution",
+			},
+		}
+		msgData, _ := json.Marshal(cancelMsg)
+		room.broadcast <- msgData
+		
+		log.Printf("⚠️ Test runner %s disconnected, unlocking room", playerName)
+	}
+	
+	// Phase-specific handling
+	switch currentPhase {
+	case "LOBBY":
+		// Just remove and update list
+		log.Printf("📋 [LOBBY] Player %s left lobby", playerName)
+		
+		// Send simple disconnect message
+		disconnectMsg := Message{
+			Type: "CHAT",
+			Data: map[string]interface{}{
+				"username": "System",
+				"text":     playerName + " left the lobby",
+				"system":   true,
+			},
+		}
+		msgData, _ := json.Marshal(disconnectMsg)
+		room.broadcast <- msgData
+		
+	case "ROLE_REVEAL", "TASK_1", "TASK_2", "TASK_3", "DISCUSSION":
+		// IN-GAME disconnect - this is a "self-kill"
+		log.Printf("☠️ [IN-GAME] Player %s SELF-KILLED (disconnected)", playerName)
+		
+		// Mark as eliminated
+		player.IsEliminated = true
+		player.IsAlive = false
+		
+		// Broadcast dramatic disconnect message
+		gameLogMsg := Message{
+			Type: "CHAT",
+			Data: map[string]interface{}{
+				"username": "System",
+				"text":     "⚠️ COMMUNICATION LOST: " + playerName + " has disconnected (Self-Killed)",
+				"system":   true,
+			},
+		}
+		msgData, _ := json.Marshal(gameLogMsg)
+		room.broadcast <- msgData
+		
+		// Broadcast elimination
+		elimMsg := Message{
+			Type: "PLAYER_ELIMINATED",
+			Data: map[string]interface{}{
+				"playerID": playerID,
+				"username": playerName,
+				"reason":   "DISCONNECTED",
+			},
+		}
+		elimData, _ := json.Marshal(elimMsg)
+		room.broadcast <- elimData
+		
+		// Check if this was the impostor
+		if playerID == room.gameState.ImpostorID {
+			log.Printf("🎉 Impostor disconnected - Civilians win by default!")
+			room.mu.Unlock()
+			room.endGame("CIVILIAN_WIN_DISCONNECT")
+			return
+		}
+		
+		// Check if all civilians are dead
+		civilianCount := 0
+		for _, p := range room.players {
+			if p.Role == "CIVILIAN" && !p.IsEliminated {
+				civilianCount++
+			}
+		}
+		
+		if civilianCount == 0 {
+			log.Printf("💀 All civilians eliminated - Impostor wins!")
+			room.mu.Unlock()
+			room.endGame("IMPOSTOR_WIN")
+			return
+		}
+	}
+	
+	// HOST MIGRATION - CRITICAL!
+	if wasHost && len(room.players) > 0 {
+		log.Printf("👑 Host migration required - old host %s disconnected", playerName)
+		
+		// Find new host (first remaining player)
+		var newHost *Player
+		var newHostID string
+		
+		for id, p := range room.players {
+			newHost = p
+			newHostID = id
+			break
+		}
+		
+		if newHost != nil {
+			newHost.IsHost = true
+			log.Printf("👑 New host assigned: %s (ID: %s)", newHost.Username, newHostID)
+			
+			// Broadcast host change
+			hostMsg := Message{
+				Type: "NEW_HOST_ASSIGNED",
+				Data: map[string]interface{}{
+					"newHostID":   newHostID,
+					"newHostName": newHost.Username,
+				},
+			}
+			hostData, _ := json.Marshal(hostMsg)
+			room.broadcast <- hostData
+			
+			// Also send chat message
+			chatMsg := Message{
+				Type: "CHAT",
+				Data: map[string]interface{}{
+					"username": "System",
+					"text":     "👑 " + newHost.Username + " is now the host",
+					"system":   true,
+				},
+			}
+			chatData, _ := json.Marshal(chatMsg)
+			room.broadcast <- chatData
+		}
+	}
+	
+	room.mu.Unlock()
+	
+	// Broadcast updated player list
+	room.broadcastPlayerList()
+	
+	// If room is empty, clean it up
+	h.mu.Lock()
+	if len(room.clients) == 0 {
+		delete(h.rooms, client.RoomID)
+		log.Printf("🧹 Room %s cleaned up (empty)", client.RoomID)
+	}
+	h.mu.Unlock()
 }
 
 func (h *Hub) getRoom(roomID string) *Room {

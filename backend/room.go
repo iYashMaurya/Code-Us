@@ -60,7 +60,7 @@ type Room struct {
 	
 	// Game State Machine
 	gameState   GameState
-	tasks       []*Task // Array of tasks for each stage
+	tasks       []*Task
 	
 	// Test Execution State
 	testRunning    bool
@@ -68,13 +68,20 @@ type Room struct {
 	testRunnerName string
 	codeSnapshot   string
 	
-	// Voting System (FIX #2)
-	votes          map[string]string // voterID -> targetID
+	// Voting System
+	votes          map[string]string
 	votingActive   bool
 	votingTimer    *time.Timer
 	
 	// Timer Control
 	timerCancel chan bool
+	
+	// SABOTAGE SYSTEM (NEW)
+	sabotageActive     bool
+	sabotageType       string        // "FREEZE" or "CORRUPT"
+	sabotageEndTime    time.Time
+	corruptedCode      string        // Store original code before corruption
+	freezeTimer        *time.Timer
 }
 
 func newRoom(id string) *Room {
@@ -91,10 +98,12 @@ func newRoom(id string) *Room {
 			TasksComplete: make(map[int]bool),
 			TimerPaused:   false,
 		},
-		testRunning:  false,
-		votes:        make(map[string]string),
-		votingActive: false,
-		timerCancel:  make(chan bool),
+		testRunning:     false,
+		votes:           make(map[string]string),
+		votingActive:    false,
+		timerCancel:     make(chan bool),
+		sabotageActive:  false,
+		sabotageType:    "",
 	}
 }
 
@@ -975,5 +984,162 @@ func (h *Hub) handleYjsConnection(w http.ResponseWriter, r *http.Request, conn *
 			}
 		}
 		room.mu.RUnlock()
+	}
+}
+
+func (r *Room) handleCorruptSabotage() {
+	log.Printf("🦠 CORRUPT sabotage activated - injecting malware")
+	
+	// Get current code from Yjs (this is a simplified version)
+	// In reality, you'd need to get the actual code from the Yjs document
+	// For now, we'll broadcast a special instruction
+	
+	malwareText := "\n// ⚠️ MALWARE DETECTED - REMOVE THIS LINE TO COMPILE\n// SYSTEM_FAILURE_CODE_0x00FF\n"
+	
+	// Broadcast corruption event
+	corruptMsg := Message{
+		Type: "SABOTAGE_CORRUPT",
+		Data: map[string]interface{}{
+			"malware": malwareText,
+			"action":  "INJECT_AT_TOP", // Tell clients to inject at top
+		},
+	}
+	data, _ := json.Marshal(corruptMsg)
+	r.broadcast <- data
+	
+	// Broadcast chat message
+	chatMsg := Message{
+		Type: "CHAT",
+		Data: map[string]interface{}{
+			"username": "System",
+			"text":     "🦠 MALWARE DETECTED - Code corrupted!",
+			"system":   true,
+		},
+	}
+	chatData, _ := json.Marshal(chatMsg)
+	r.broadcast <- chatData
+	
+	// Mark as resolved (it's permanent until they fix it)
+	r.mu.Lock()
+	r.sabotageActive = false
+	r.sabotageType = ""
+	r.mu.Unlock()
+	
+	log.Printf("🦠 CORRUPT sabotage injected - players must remove malware manually")
+}
+
+
+func (r *Room) handleFreezeSabotage() {
+	log.Printf("❄️ FREEZE sabotage activated - 5 second lockout")
+	
+	// Broadcast freeze event
+	freezeMsg := Message{
+		Type: "SABOTAGE_STARTED",
+		Data: map[string]interface{}{
+			"type":     "FREEZE",
+			"duration": 5000, // milliseconds
+		},
+	}
+	data, _ := json.Marshal(freezeMsg)
+	r.broadcast <- data
+	
+	// Broadcast chat message
+	chatMsg := Message{
+		Type: "CHAT",
+		Data: map[string]interface{}{
+			"username": "System",
+			"text":     "⚠️ SYSTEM JAMMED - Communications frozen!",
+			"system":   true,
+		},
+	}
+	chatData, _ := json.Marshal(chatMsg)
+	r.broadcast <- chatData
+	
+	// Auto-resolve after 5 seconds
+	go func() {
+		time.Sleep(5 * time.Second)
+		
+		r.mu.Lock()
+		r.sabotageActive = false
+		r.sabotageType = ""
+		r.mu.Unlock()
+		
+		// Broadcast freeze end
+		endMsg := Message{
+			Type: "SABOTAGE_ENDED",
+			Data: map[string]interface{}{
+				"type": "FREEZE",
+			},
+		}
+		endData, _ := json.Marshal(endMsg)
+		r.broadcast <- endData
+		
+		// Chat notification
+		chatMsg := Message{
+			Type: "CHAT",
+			Data: map[string]interface{}{
+				"username": "System",
+				"text":     "✅ Systems restored - Communications online",
+				"system":   true,
+			},
+		}
+		chatData, _ := json.Marshal(chatMsg)
+		r.broadcast <- chatData
+		
+		log.Printf("✅ FREEZE sabotage ended")
+	}()
+}
+
+func (r *Room) handleSabotage(playerID, sabotageType string) {
+	r.mu.Lock()
+	
+	// Verify player is impostor
+	player := r.players[playerID]
+	if player == nil || player.Role != "IMPOSTOR" {
+		r.mu.Unlock()
+		log.Printf("❌ Non-impostor tried to sabotage: %s", playerID)
+		return
+	}
+	
+	// Check if sabotage already active
+	if r.sabotageActive {
+		r.mu.Unlock()
+		
+		// Send error to impostor
+		errorMsg := Message{
+			Type: "ERROR",
+			Data: map[string]interface{}{
+				"message": "Sabotage already in progress!",
+			},
+		}
+		data, _ := json.Marshal(errorMsg)
+		for client := range r.clients {
+			if client.PlayerID == playerID {
+				client.send <- data
+				break
+			}
+		}
+		return
+	}
+	
+	r.sabotageActive = true
+	r.sabotageType = sabotageType
+	
+	log.Printf("💀 SABOTAGE: %s activated %s", player.Username, sabotageType)
+	
+	r.mu.Unlock()
+	
+	switch sabotageType {
+	case "FREEZE":
+		r.handleFreezeSabotage()
+		
+	case "CORRUPT":
+		r.handleCorruptSabotage()
+		
+	default:
+		log.Printf("⚠️ Unknown sabotage type: %s", sabotageType)
+		r.mu.Lock()
+		r.sabotageActive = false
+		r.mu.Unlock()
 	}
 }

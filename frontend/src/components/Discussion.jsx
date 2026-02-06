@@ -1,13 +1,14 @@
+'use i18n';
 import React, { useState, useEffect, useRef } from 'react';
 import { useGame } from '../context/GameContext';
-import { useTranslation } from '../utils/translations';
+// import { useTranslation } from '../utils/translations';
 import { motion } from 'framer-motion';
 import Starfield from './Starfield';
 import Ship, { getShipType } from './Ship';
 
 export default function Discussion({ onVote }) {
   const { state, dispatch } = useGame();
-  const { t } = useTranslation(state.language);
+  // const { t } = useTranslation(state.language);
   const [selectedTarget, setSelectedTarget] = useState(null);
   const [timeLeft, setTimeLeft] = useState(30); // FIX #7: Default 30 seconds
   const [hasVoted, setHasVoted] = useState(false);

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"sync"
+	"time"
 )
 
 type Hub struct {
@@ -25,26 +26,74 @@ func (h *Hub) run() {
 	for {
 		select {
 		case client := <-h.register:
-			h.mu.Lock()
-			if room, exists := h.rooms[client.RoomID]; exists {
-				room.clients[client] = true
-				log.Printf("Client joined room %s", client.RoomID)
-			} else {
-				room := newRoom(client.RoomID)
-				h.rooms[client.RoomID] = room
-				room.clients[client] = true
-				go room.run()
-				log.Printf("Created new room %s", client.RoomID)
-			}
-			h.mu.Unlock()
-
+			h.handleRegister(client)
 		case client := <-h.unregister:
 			h.handleDisconnect(client)
 		}
 	}
 }
 
-// ENHANCED: Game-aware disconnect handling with host migration
+// ✅ FIX #1 & #3: Race condition protection + Join validation
+func (h *Hub) handleRegister(client *Client) {
+	h.mu.Lock()
+	room, exists := h.rooms[client.RoomID]
+	
+	// Create room if it doesn't exist
+	if !exists {
+		room = newRoom(client.RoomID)
+		h.rooms[client.RoomID] = room
+		go room.run()
+		log.Printf("✅ Created new room %s", client.RoomID)
+	}
+	h.mu.Unlock()
+	
+	// ✅ FIX #3: Check game phase before allowing join
+	room.mu.RLock()
+	currentPhase := room.gameState.Phase
+	room.mu.RUnlock()
+	
+	if currentPhase != "LOBBY" {
+		log.Printf("🚫 REJECTED join attempt - room %s in phase %s", client.RoomID, currentPhase)
+		
+		// Send rejection message
+		errorMsg := Message{
+			Type: "ERROR_ACCESS_DENIED",
+			Data: map[string]interface{}{
+				"reason":  "GAME_IN_PROGRESS",
+				"message": "Cannot join - game already started",
+				"phase":   string(currentPhase),
+			},
+		}
+		errData, _ := json.Marshal(errorMsg)
+		
+		// Send error to client
+		select {
+		case client.send <- errData:
+			log.Printf("📤 Sent rejection message to client")
+		default:
+			log.Printf("⚠️ Could not send rejection message")
+		}
+		
+		// Close connection after brief delay
+		time.AfterFunc(500*time.Millisecond, func() {
+			close(client.send)
+			client.conn.Close()
+			log.Printf("🔌 Closed rejected client connection")
+		})
+		
+		return
+	}
+	
+	// Add client to room
+	room.mu.Lock()
+	room.clients[client] = true
+	clientCount := len(room.clients)
+	room.mu.Unlock()
+	
+	log.Printf("📥 Client joined room %s (total: %d clients)", client.RoomID, clientCount)
+}
+
+// ✅ ENHANCED: Disconnect handling with comprehensive cleanup
 func (h *Hub) handleDisconnect(client *Client) {
 	h.mu.Lock()
 	room, roomExists := h.rooms[client.RoomID]
@@ -60,7 +109,17 @@ func (h *Hub) handleDisconnect(client *Client) {
 	// Get player info before removing
 	player, playerExists := room.players[client.PlayerID]
 	if !playerExists {
+		// Remove client even if no player record
+		delete(room.clients, client)
 		room.mu.Unlock()
+		
+		// Safe close
+		select {
+		case <-client.send:
+		default:
+			close(client.send)
+		}
+		
 		log.Printf("⚠️ Disconnected client had no player record")
 		return
 	}
@@ -71,15 +130,22 @@ func (h *Hub) handleDisconnect(client *Client) {
 	currentPhase := room.gameState.Phase
 	wasTestRunner := room.testRunning && room.testRunner == playerID
 	
-	log.Printf("💀 Player disconnecting: %s (ID: %s, Phase: %s, Host: %v)", 
-		playerName, playerID, currentPhase, wasHost)
+	log.Printf("💀 Player disconnecting: %s (ID: %s, Phase: %s, Host: %v, TestRunner: %v)", 
+		playerName, playerID, currentPhase, wasHost, wasTestRunner)
 
 	// Remove from clients and players
 	delete(room.clients, client)
 	delete(room.players, playerID)
-	close(client.send)
 	
-	// CRITICAL: Cancel test if this player was running it
+	// Safe close of send channel
+	select {
+	case <-client.send:
+		// Already closed
+	default:
+		close(client.send)
+	}
+	
+	// ✅ FIX: Cancel test if this player was running it
 	if wasTestRunner {
 		room.testRunning = false
 		room.testRunner = ""
@@ -129,7 +195,7 @@ func (h *Hub) handleDisconnect(client *Client) {
 			Type: "CHAT",
 			Data: map[string]interface{}{
 				"username": "System",
-				"text":     "⚠️ COMMUNICATION LOST: " + playerName + " has disconnected (Self-Killed)",
+				"text":     "⚠️ COMMUNICATION LOST: " + playerName + " has disconnected",
 				"system":   true,
 			},
 		}
@@ -167,12 +233,12 @@ func (h *Hub) handleDisconnect(client *Client) {
 		if civilianCount == 0 {
 			log.Printf("💀 All civilians eliminated - Impostor wins!")
 			room.mu.Unlock()
-			room.endGame("IMPOSTOR_WIN")
+			room.endGame("IMPOSTER_WIN")
 			return
 		}
 	}
 	
-	// HOST MIGRATION - CRITICAL!
+	// ✅ FIX #9: Enhanced host migration
 	if wasHost && len(room.players) > 0 {
 		log.Printf("👑 Host migration required - old host %s disconnected", playerName)
 		
@@ -190,12 +256,22 @@ func (h *Hub) handleDisconnect(client *Client) {
 			newHost.IsHost = true
 			log.Printf("👑 New host assigned: %s (ID: %s)", newHost.Username, newHostID)
 			
-			// Broadcast host change
+			// Unlock to broadcast
+			room.mu.Unlock()
+			
+			// Broadcast updated player list immediately
+			room.broadcastPlayerList()
+			
+			// Re-lock for remaining operations
+			room.mu.Lock()
+			
+			// Broadcast host change with additional info
 			hostMsg := Message{
 				Type: "NEW_HOST_ASSIGNED",
 				Data: map[string]interface{}{
 					"newHostID":   newHostID,
 					"newHostName": newHost.Username,
+					"canStart":    len(room.players) >= 3,
 				},
 			}
 			hostData, _ := json.Marshal(hostMsg)

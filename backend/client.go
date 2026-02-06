@@ -59,7 +59,7 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 
 	client.hub.register <- client
 
-	// CRITICAL: Send INIT message to client immediately after registration
+	// Send INIT message to client immediately after registration
 	initMsg := Message{
 		Type: "INIT",
 		Data: map[string]interface{}{
@@ -151,6 +151,7 @@ func (c *Client) writePump() {
 	}
 }
 
+// ✅ ENHANCED: Session validation for all actions
 func (c *Client) handleMessage(message []byte) {
 	var msg Message
 	if err := json.Unmarshal(message, &msg); err != nil {
@@ -158,7 +159,7 @@ func (c *Client) handleMessage(message []byte) {
 		return
 	}
 
-	// CRITICAL: Get room reference at the start
+	// Get room reference at the start
 	room := c.hub.getRoom(c.RoomID)
 	if room == nil {
 		log.Printf("Room %s not found", c.RoomID)
@@ -193,7 +194,31 @@ func (c *Client) handleMessage(message []byte) {
 			payload, _ := json.Marshal(selfMsg)
 			c.send <- payload
 		}
+
 	case "SABOTAGE":
+		// ✅ FIX #7: Validate player is impostor and alive
+		room.mu.RLock()
+		player := room.players[c.PlayerID]
+		room.mu.RUnlock()
+		
+		if player == nil {
+			log.Printf("❌ Invalid player tried to sabotage: %s", c.PlayerID)
+			c.sendError("Player not found")
+			return
+		}
+		
+		if player.IsEliminated {
+			log.Printf("❌ Eliminated player %s tried to sabotage", c.Username)
+			c.sendError("Cannot sabotage - you are eliminated")
+			return
+		}
+		
+		if player.Role != "IMPOSTER" {
+			log.Printf("❌ Non-impostor %s tried to sabotage", c.Username)
+			c.sendError("Only the impostor can sabotage")
+			return
+		}
+		
 		data, ok := msg.Data.(map[string]interface{})
 		if !ok {
 			return
@@ -203,8 +228,9 @@ func (c *Client) handleMessage(message []byte) {
 		log.Printf("💀 SABOTAGE request: %s from %s", sabotageType, c.Username)
 
 		room.handleSabotage(c.PlayerID, sabotageType)
+
 	case "START_GAME":
-		// FIXED: Add comprehensive logging and explicit checks
+		// ✅ ENHANCED: Comprehensive validation
 		log.Printf("🎮 START_GAME received from %s (PlayerID: %s, RoomID: %s)",
 			c.Username, c.PlayerID, c.RoomID)
 
@@ -214,31 +240,13 @@ func (c *Client) handleMessage(message []byte) {
 
 		if player == nil {
 			log.Printf("❌ START_GAME rejected: Player %s not found in room %s", c.PlayerID, c.RoomID)
-
-			// Send error to client
-			errorMsg := Message{
-				Type: "ERROR",
-				Data: map[string]interface{}{
-					"message": "Player not found in room",
-				},
-			}
-			errData, _ := json.Marshal(errorMsg)
-			c.send <- errData
+			c.sendError("Player not found in room")
 			return
 		}
 
 		if !player.IsHost {
 			log.Printf("❌ START_GAME rejected: Player %s (%s) is not host", player.Username, c.PlayerID)
-
-			// Send error to client
-			errorMsg := Message{
-				Type: "ERROR",
-				Data: map[string]interface{}{
-					"message": "Only the host can start the game",
-				},
-			}
-			errData, _ := json.Marshal(errorMsg)
-			c.send <- errData
+			c.sendError("Only the host can start the game")
 			return
 		}
 
@@ -246,6 +254,23 @@ func (c *Client) handleMessage(message []byte) {
 		room.startGame()
 
 	case "RUN_TESTS":
+		// ✅ FIX #7: Validate player is alive
+		room.mu.RLock()
+		player := room.players[c.PlayerID]
+		room.mu.RUnlock()
+		
+		if player == nil {
+			log.Printf("❌ Invalid player tried to run tests: %s", c.PlayerID)
+			c.sendError("Player not found")
+			return
+		}
+		
+		if player.IsEliminated {
+			log.Printf("❌ Eliminated player %s tried to run tests", c.Username)
+			c.sendError("Cannot run tests - you are eliminated")
+			return
+		}
+		
 		data, ok := msg.Data.(map[string]interface{})
 		if !ok {
 			return
@@ -255,19 +280,56 @@ func (c *Client) handleMessage(message []byte) {
 		room.handleRunTests(c.PlayerID, code)
 
 	case "CHAT":
+		// ✅ Already validated - good!
 		room.mu.RLock()
 		player := room.players[c.PlayerID]
 		room.mu.RUnlock()
 
 		if player != nil && !player.IsEliminated {
 			room.broadcast <- message
+		} else {
+			log.Printf("❌ Eliminated/invalid player tried to chat: %s", c.PlayerID)
 		}
 
 	case "EMERGENCY":
+		// ✅ FIX #7: Validate player is alive
+		room.mu.RLock()
+		player := room.players[c.PlayerID]
+		room.mu.RUnlock()
+		
+		if player == nil {
+			log.Printf("❌ Invalid player tried emergency meeting: %s", c.PlayerID)
+			c.sendError("Player not found")
+			return
+		}
+		
+		if player.IsEliminated {
+			log.Printf("❌ Eliminated player %s tried emergency meeting", c.Username)
+			c.sendError("Cannot call meeting - you are eliminated")
+			return
+		}
+		
 		log.Printf("🚨 EMERGENCY button pressed by %s", c.Username)
 		room.startDiscussion()
 
 	case "VOTE":
+		// ✅ FIX #7: Validate player is alive
+		room.mu.RLock()
+		player := room.players[c.PlayerID]
+		room.mu.RUnlock()
+		
+		if player == nil {
+			log.Printf("❌ Invalid player tried to vote: %s", c.PlayerID)
+			c.sendError("Player not found")
+			return
+		}
+		
+		if player.IsEliminated {
+			log.Printf("❌ Eliminated player %s tried to vote", c.Username)
+			c.sendError("Cannot vote - you are eliminated")
+			return
+		}
+		
 		data, ok := msg.Data.(map[string]interface{})
 		if !ok {
 			return
@@ -279,5 +341,23 @@ func (c *Client) handleMessage(message []byte) {
 
 	default:
 		log.Printf("⚠️ Unknown message type: %s", msg.Type)
+	}
+}
+
+// ✅ NEW: Helper function to send errors to client
+func (c *Client) sendError(message string) {
+	errorMsg := Message{
+		Type: "ERROR",
+		Data: map[string]interface{}{
+			"message": message,
+		},
+	}
+	errData, _ := json.Marshal(errorMsg)
+	
+	select {
+	case c.send <- errData:
+		log.Printf("📤 Sent error to %s: %s", c.Username, message)
+	default:
+		log.Printf("⚠️ Could not send error to %s (channel full)", c.Username)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -43,11 +44,11 @@ type Task struct {
 
 type GameState struct {
 	Phase         GamePhase          `json:"phase"`
-	CurrentStage  int                `json:"currentStage"`  // 0=lobby, 1=task1, 2=task2, 3=task3
-	TimerSeconds  int                `json:"timerSeconds"`  // Global countdown
+	CurrentStage  int                `json:"currentStage"`
+	TimerSeconds  int                `json:"timerSeconds"`
 	ImpostorID    string             `json:"impostorID"`
-	TasksComplete map[int]bool       `json:"tasksComplete"` // Track which stages are done
-	TimerPaused   bool               `json:"timerPaused"`   // For discussion phase
+	TasksComplete map[int]bool       `json:"tasksComplete"`
+	TimerPaused   bool               `json:"timerPaused"`
 }
 
 type Room struct {
@@ -73,17 +74,19 @@ type Room struct {
 	votingActive   bool
 	votingTimer    *time.Timer
 	
-	// Timer Control
-	timerCancel chan bool
+	// ✅ FIX #2: Proper timer cancellation
+	timerCancel chan struct{}  // Changed from bool to struct{}
+	timerDone   chan struct{}  // NEW: Signal when timer goroutine completes
 	
-	// SABOTAGE SYSTEM (NEW)
+	// Sabotage System
 	sabotageActive     bool
-	sabotageType       string        // "FREEZE" or "CORRUPT"
+	sabotageType       string
 	sabotageEndTime    time.Time
-	corruptedCode      string        // Store original code before corruption
+	corruptedCode      string
 	freezeTimer        *time.Timer
 }
 
+// ✅ FIX #2: Initialize new timer channels
 func newRoom(id string) *Room {
 	return &Room{
 		ID:          id,
@@ -101,7 +104,8 @@ func newRoom(id string) *Room {
 		testRunning:     false,
 		votes:           make(map[string]string),
 		votingActive:    false,
-		timerCancel:     make(chan bool),
+		timerCancel:     make(chan struct{}),  // ✅ Fixed
+		timerDone:       make(chan struct{}),  // ✅ New
 		sabotageActive:  false,
 		sabotageType:    "",
 	}
@@ -142,8 +146,7 @@ func (r *Room) addPlayer(playerID, username string) {
 	log.Printf("Player %s (%s) added to room %s", username, playerID, r.ID)
 }
 
-// Replace your startGame() function in room.go with this version
-
+// ✅ ENHANCED: Better logging and sabotage reset
 func (r *Room) startGame() {
 	log.Printf("🎬 [1/10] startGame() CALLED for room %s", r.ID)
 	
@@ -158,6 +161,19 @@ func (r *Room) startGame() {
 		log.Printf("❌ [ABORT] Not enough players to start (need 3, have %d)", playerCount)
 		return
 	}
+
+	// ✅ FIX #4: Reset sabotage state
+	log.Printf("🎬 [3.5/10] Resetting sabotage state...")
+	r.sabotageActive = false
+	r.sabotageType = ""
+	if r.freezeTimer != nil {
+		r.freezeTimer.Stop()
+		r.freezeTimer = nil
+	}
+	
+	// ✅ FIX #2: Initialize NEW timer channels (prevents reuse)
+	r.timerCancel = make(chan struct{})
+	r.timerDone = make(chan struct{})
 
 	log.Printf("🎬 [4/10] Selecting random impostor...")
 	
@@ -176,8 +192,8 @@ func (r *Room) startGame() {
 	// Assign roles
 	for id, player := range r.players {
 		if id == r.gameState.ImpostorID {
-			player.Role = "IMPOSTOR"
-			log.Printf("   👹 %s is IMPOSTOR", player.Username)
+			player.Role = "IMPOSTER"
+			log.Printf("   👹 %s is IMPOSTER", player.Username)
 		} else {
 			player.Role = "CIVILIAN"
 			log.Printf("   👤 %s is CIVILIAN", player.Username)
@@ -229,13 +245,14 @@ func (r *Room) startGame() {
 	}()
 }
 
-// Global Timer - The "Ticking Bomb"
+// ✅ FIX #2: Proper goroutine cleanup with channels
 func (r *Room) startGlobalTimer() {
 	log.Printf("🕐 Starting global timer for room %s", r.ID)
 	
 	go func() {
 		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
+		defer close(r.timerDone)  // ✅ Signal completion
 		
 		for {
 			select {
@@ -265,7 +282,7 @@ func (r *Room) startGlobalTimer() {
 				// Check if time is up
 				if currentTime <= 0 {
 					log.Printf("⏰ Timer expired for room %s - Impostor wins!", r.ID)
-					r.endGame("IMPOSTOR_WIN_TIMEOUT")
+					r.endGame("IMPOSTER_WIN_TIMEOUT")
 					return
 				}
 				
@@ -291,6 +308,8 @@ func (r *Room) resumeTimer() {
 	log.Printf("▶️ Timer resumed for room %s", r.ID)
 }
 
+// Part 2 of room.go - Tasks, Validation, Voting
+
 func (r *Room) loadAllTasks() []*Task {
 	return []*Task{
 		// Task 1: Engine Room - SportBrakes Bug
@@ -303,10 +322,10 @@ func (r *Room) loadAllTasks() []*Task {
     private String model;
     private Brakes brakes;
 
-    // [BUG] Constructor should initialize brakes with SportBrakes
+
     public RacingCar(String model) {
         this.model = model;
-        // Missing: this.brakes = new SportBrakes();
+
     }
 
     public void applyBrakes() {
@@ -344,11 +363,10 @@ class SportBrakes extends Brakes {
     public static void main(String[] args) {
         int targetAltitude = 2050;
         
-        // [BUG 1] Integer division - should be 0.5, not 0.0
+
         double efficiency = 1 / 2;
         System.out.println("Efficiency: " + efficiency);
 
-        // [BUG 2] Loop condition - should be <, not !=
         while (altitude != targetAltitude) {
             climb(20);
             System.out.println("Altitude: " + altitude);
@@ -356,7 +374,7 @@ class SportBrakes extends Brakes {
         }
     }
 
-    // [BUG 3] Variable shadowing - parameter hides class variable
+
     public static void climb(int altitude) {
         altitude = altitude + 20;
     }
@@ -374,11 +392,11 @@ class SportBrakes extends Brakes {
     private int crew = 5;
 
     public void distributeOxygen() {
-        // [BUG 1] Integer division - each crew member gets 0 oxygen!
+
         int perPerson = oxygenLevel / crew;
         System.out.println("Oxygen per person: " + perPerson);
         
-        // [BUG 2] Off-by-one error - should start at 1, not 0
+
         for (int i = 0; i <= crew; i++) {
             System.out.println("Crew " + i + " receiving oxygen...");
         }
@@ -388,10 +406,10 @@ class SportBrakes extends Brakes {
         int cyclesNeeded = minutes;
         int cyclesComplete = 0;
         
-        // [BUG 3] Infinite loop - cyclesComplete never increments!
+
         while (cyclesComplete < cyclesNeeded) {
             System.out.println("Filtering... Cycle " + cyclesComplete);
-            // Missing: cyclesComplete++;
+
         }
     }
 }`,
@@ -405,7 +423,6 @@ func (r *Room) handleRunTests(playerID, code string) {
 
 	// Check if tests are already running
 	if r.testRunning {
-		// player := r.players[playerID]
 		r.mu.Unlock()
 		
 		errorMsg := Message{
@@ -495,26 +512,45 @@ func (r *Room) handleRunTests(playerID, code string) {
 	}()
 }
 
-// Validate code for specific stage
+// ✅ FIX #12: Enhanced code validation with normalization
 func (r *Room) validateStageCode(stage int, code string) bool {
+	// Normalize code for better matching
+	normalized := normalizeCode(code)
+	
 	switch stage {
 	case 1: // Task 1: SportBrakes
-		return strings.Contains(code, "new SportBrakes()")
+		return strings.Contains(normalized, "newsportbrakes()")
 	
 	case 2: // Task 2: Satellite
-		hasEfficiency := strings.Contains(code, "1.0 / 2") || strings.Contains(code, "1 / 2.0") || strings.Contains(code, "= 0.5")
-		hasLoop := strings.Contains(code, "while (altitude < targetAltitude)") || strings.Contains(code, "while(altitude<targetAltitude)")
-		hasClimb := strings.Contains(code, "climb(int amount)") || strings.Contains(code, "climb(int step)") || strings.Contains(code, "SatelliteSystem.altitude")
+		hasEfficiency := containsAny(normalized, []string{
+			"1.0/2", "1/2.0", "1.0/2.0", "=0.5", "efficiency=0.5",
+		})
+		hasLoop := containsAny(normalized, []string{
+			"altitude<targetaltitude",
+			"altitude<=targetaltitude",
+		})
+		hasClimb := containsAny(normalized, []string{
+			"satellitesystem.altitude+=",
+			"satellitesystem.altitude=satellitesystem.altitude+",
+		})
 		return hasEfficiency && hasLoop && hasClimb
 	
 	case 3: // Task 3: Oxygen (two bugs minimum)
-		hasDistribution := strings.Contains(code, "double perPerson") || strings.Contains(code, "(double)oxygenLevel")
-		hasLoopFix := strings.Contains(code, "i = 1") || strings.Contains(code, "i < crew")
-		hasIncrement := strings.Contains(code, "cyclesComplete++") || strings.Contains(code, "cyclesComplete = cyclesComplete + 1")
+		hasDistribution := containsAny(normalized, []string{
+			"doubleperperson", "(double)oxygenlevel",
+		})
+		hasLoopFix := containsAny(normalized, []string{
+			"i=1;i<=crew", "i<crew",
+		})
+		hasIncrement := containsAny(normalized, []string{
+			"cyclescomplete++", "cyclescomplete+=1",
+		})
+		
 		bugsFixed := 0
 		if hasDistribution { bugsFixed++ }
 		if hasLoopFix { bugsFixed++ }
 		if hasIncrement { bugsFixed++ }
+		
 		return bugsFixed >= 2 // Need at least 2 of 3 bugs fixed
 	
 	default:
@@ -522,7 +558,42 @@ func (r *Room) validateStageCode(stage int, code string) bool {
 	}
 }
 
-// Advance to next stage - THE SYNCHRONIZED CONVEYOR BELT
+// ✅ FIX #12: Helper functions for code validation
+func normalizeCode(code string) string {
+	// Remove single-line comments
+	lines := strings.Split(code, "\n")
+	var cleaned []string
+	for _, line := range lines {
+		if idx := strings.Index(line, "//"); idx != -1 {
+			line = line[:idx]
+		}
+		cleaned = append(cleaned, line)
+	}
+	result := strings.Join(cleaned, "\n")
+	
+	// Remove multi-line comments
+	re := regexp.MustCompile(`(?s)/\*.*?\*/`)
+	result = re.ReplaceAllString(result, "")
+	
+	// Remove all whitespace and lowercase
+	result = strings.ReplaceAll(result, " ", "")
+	result = strings.ReplaceAll(result, "\t", "")
+	result = strings.ReplaceAll(result, "\n", "")
+	result = strings.ReplaceAll(result, "\r", "")
+	
+	return strings.ToLower(result)
+}
+
+func containsAny(text string, patterns []string) bool {
+	for _, pattern := range patterns {
+		if strings.Contains(text, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// Advance to next stage
 func (r *Room) advanceStage(completedStage int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -576,7 +647,7 @@ func (r *Room) advanceStage(completedStage int) {
 	}()
 }
 
-// FIX #6: Start discussion with auto-resume
+// ✅ ENHANCED: Discussion with better timer management
 func (r *Room) startDiscussion() {
 	r.mu.Lock()
 	r.gameState.TimerPaused = true
@@ -589,7 +660,7 @@ func (r *Room) startDiscussion() {
 	
 	log.Printf("🗣️ Discussion started in room %s - Timer paused", r.ID)
 	
-	// FIX #7: Server-controlled voting timer (30 seconds)
+	// Server-controlled voting timer (30 seconds)
 	votingDuration := 30
 	
 	// Broadcast countdown to all clients
@@ -627,7 +698,7 @@ func (r *Room) startDiscussion() {
 	}()
 }
 
-// FIX #2: Implement vote aggregation system
+// ✅ ENHANCED: Vote aggregation
 func (r *Room) handleVote(voterID, targetID string) {
 	r.mu.Lock()
 	
@@ -636,7 +707,7 @@ func (r *Room) handleVote(voterID, targetID string) {
 	
 	log.Printf("🗳️ Player %s voted for %s", voterID, targetID)
 	
-	// Broadcast vote update to show who has voted (but not who they voted for)
+	// Broadcast vote update to show who has voted
 	voteStatus := make(map[string]bool)
 	for vid := range r.votes {
 		voteStatus[vid] = true
@@ -664,13 +735,28 @@ func (r *Room) handleVote(voterID, targetID string) {
 	voteCount := len(r.votes)
 	r.mu.RUnlock()
 	
+	// ✅ FIX #8: Add brief delay for UX
 	if voteCount >= aliveCount {
-		log.Printf("✅ All players voted (%d/%d) - tallying now", voteCount, aliveCount)
+		log.Printf("✅ All players voted (%d/%d) - tallying in 1 second", voteCount, aliveCount)
+		
+		// Notify all votes are in
+		allInMsg := Message{
+			Type: "ALL_VOTES_IN",
+			Data: map[string]interface{}{
+				"message": "All votes received - tallying results...",
+			},
+		}
+		allInData, _ := json.Marshal(allInMsg)
+		r.broadcast <- allInData
+		
+		time.Sleep(1 * time.Second)
 		r.tallyVotes()
 	}
 }
 
-// FIX #2: Tally votes and determine outcome
+// Part 3 of room.go - Voting, End Game, Sabotage
+
+// Tally votes and determine outcome
 func (r *Room) tallyVotes() {
 	r.mu.Lock()
 	
@@ -829,29 +915,42 @@ func (r *Room) eliminatePlayer(playerID string) {
 	}
 }
 
+// ✅ FIX #2 & #5: Proper timer cleanup and single message
 func (r *Room) endGame(reason string) {
 	log.Printf("🏁 [endGame] Starting game end sequence - Reason: %s", reason)
 	
-	// Cancel timer
+	// ✅ FIX #2: Safe timer cancellation
 	select {
-	case r.timerCancel <- true:
-		log.Printf("🏁 [endGame] Timer cancelled")
+	case <-r.timerCancel:
+		log.Printf("🏁 [endGame] Timer already cancelled")
 	default:
-		log.Printf("🏁 [endGame] Timer already stopped")
+		close(r.timerCancel)
+		log.Printf("🏁 [endGame] Timer cancel channel closed")
+	}
+	
+	// Wait for timer goroutine to finish (with timeout)
+	select {
+	case <-r.timerDone:
+		log.Printf("✅ Timer goroutine stopped cleanly")
+	case <-time.After(2 * time.Second):
+		log.Printf("⚠️ Timer stop timeout (goroutine may still be running)")
 	}
 	
 	r.mu.Lock()
-	r.gameState.Phase = "GAME_OVER"  // Use string literal instead of const
+	r.gameState.Phase = "GAME_OVER"
 	impostorID := r.gameState.ImpostorID
-	log.Printf("🏁 [endGame] Phase set to GAME_OVER, Impostor was: %s", impostorID)
+	
+	// ✅ FIX #5: Build complete final state
+	finalState := r.buildGameStatePayload()
 	r.mu.Unlock()
 
-	// First, broadcast GAME_ENDED message with reason and impostor
+	// ✅ FIX #5: Send single combined message
 	msg := Message{
 		Type: "GAME_ENDED",
 		Data: map[string]interface{}{
 			"reason":     reason,
 			"impostorID": impostorID,
+			"finalState": finalState,
 		},
 	}
 
@@ -859,16 +958,27 @@ func (r *Room) endGame(reason string) {
 	log.Printf("🏁 [endGame] Broadcasting GAME_ENDED message")
 	r.broadcast <- data
 	
-	// Small delay to ensure message is received
-	time.Sleep(500 * time.Millisecond)
-	
-	// Then broadcast final game state
-	log.Printf("🏁 [endGame] Broadcasting final GAME_STATE")
-	r.broadcastGameState()
-	
 	log.Printf("✅ [endGame] Game ended: %s", reason)
 }
-// Replace your broadcastGameState() function in room.go with this version
+
+// ✅ FIX #5: Helper to build game state
+func (r *Room) buildGameStatePayload() map[string]interface{} {
+	var currentTask *Task
+	if r.gameState.CurrentStage >= 1 && r.gameState.CurrentStage <= 3 {
+		currentTask = r.tasks[r.gameState.CurrentStage-1]
+	}
+	
+	return map[string]interface{}{
+		"phase":         r.gameState.Phase,
+		"currentStage":  r.gameState.CurrentStage,
+		"timerSeconds":  r.gameState.TimerSeconds,
+		"tasksComplete": r.gameState.TasksComplete,
+		"players":       r.players,
+		"testRunning":   r.testRunning,
+		"testRunner":    r.testRunnerName,
+		"task":          currentTask,
+	}
+}
 
 func (r *Room) broadcastGameState() {
 	r.mu.RLock()
@@ -914,7 +1024,6 @@ func (r *Room) broadcastGameState() {
 	}
 
 	log.Printf("📡 [broadcastGameState] Message marshaled successfully (%d bytes)", len(data))
-	log.Printf("📡 [broadcastGameState] Message type: GAME_STATE")
 	
 	r.mu.RUnlock()
 
@@ -934,6 +1043,7 @@ func (r *Room) broadcastPlayerList() {
 	r.broadcast <- data
 }
 
+// Yjs WebSocket handler
 func (h *Hub) handleYjsConnection(w http.ResponseWriter, r *http.Request, conn *websocket.Conn) {
 	roomID := r.URL.Query().Get("room")
 	if roomID == "" {
@@ -987,47 +1097,47 @@ func (h *Hub) handleYjsConnection(w http.ResponseWriter, r *http.Request, conn *
 	}
 }
 
-func (r *Room) handleCorruptSabotage() {
-	log.Printf("🦠 CORRUPT sabotage activated - injecting malware")
-	
-	// Get current code from Yjs (this is a simplified version)
-	// In reality, you'd need to get the actual code from the Yjs document
-	// For now, we'll broadcast a special instruction
-	
-	malwareText := "\n// ⚠️ MALWARE DETECTED - REMOVE THIS LINE TO COMPILE\n// SYSTEM_FAILURE_CODE_0x00FF\n"
-	
-	// Broadcast corruption event
-	corruptMsg := Message{
-		Type: "SABOTAGE_CORRUPT",
-		Data: map[string]interface{}{
-			"malware": malwareText,
-			"action":  "INJECT_AT_TOP", // Tell clients to inject at top
-		},
-	}
-	data, _ := json.Marshal(corruptMsg)
-	r.broadcast <- data
-	
-	// Broadcast chat message
-	chatMsg := Message{
-		Type: "CHAT",
-		Data: map[string]interface{}{
-			"username": "System",
-			"text":     "🦠 MALWARE DETECTED - Code corrupted!",
-			"system":   true,
-		},
-	}
-	chatData, _ := json.Marshal(chatMsg)
-	r.broadcast <- chatData
-	
-	// Mark as resolved (it's permanent until they fix it)
+// ✅ SABOTAGE HANDLERS
+
+func (r *Room) handleSabotage(playerID, sabotageType string) {
 	r.mu.Lock()
-	r.sabotageActive = false
-	r.sabotageType = ""
+	
+	// Verify player is impostor (already validated in client.go)
+	player := r.players[playerID]
+	if player == nil || player.Role != "IMPOSTER" {
+		r.mu.Unlock()
+		log.Printf("❌ Invalid sabotage attempt: %s", playerID)
+		return
+	}
+	
+	// Check if sabotage already active
+	if r.sabotageActive {
+		r.mu.Unlock()
+		log.Printf("⚠️ Sabotage already active")
+		return
+	}
+	
+	r.sabotageActive = true
+	r.sabotageType = sabotageType
+	
+	log.Printf("💀 SABOTAGE: %s activated %s", player.Username, sabotageType)
+	
 	r.mu.Unlock()
 	
-	log.Printf("🦠 CORRUPT sabotage injected - players must remove malware manually")
+	switch sabotageType {
+	case "FREEZE":
+		r.handleFreezeSabotage()
+		
+	case "CORRUPT":
+		r.handleCorruptSabotage()
+		
+	default:
+		log.Printf("⚠️ Unknown sabotage type: %s", sabotageType)
+		r.mu.Lock()
+		r.sabotageActive = false
+		r.mu.Unlock()
+	}
 }
-
 
 func (r *Room) handleFreezeSabotage() {
 	log.Printf("❄️ FREEZE sabotage activated - 5 second lockout")
@@ -1090,56 +1200,40 @@ func (r *Room) handleFreezeSabotage() {
 	}()
 }
 
-func (r *Room) handleSabotage(playerID, sabotageType string) {
+func (r *Room) handleCorruptSabotage() {
+	log.Printf("🦠 CORRUPT sabotage activated - injecting malware")
+	
+	malwareText := "\n// ⚠️ MALWARE DETECTED - REMOVE THIS LINE TO COMPILE\n// SYSTEM_FAILURE_CODE_0x00FF\n"
+	
+	// Broadcast corruption event
+	corruptMsg := Message{
+		Type: "SABOTAGE_CORRUPT",
+		Data: map[string]interface{}{
+			"malware": malwareText,
+			"action":  "INJECT_AT_TOP",
+		},
+	}
+	data, _ := json.Marshal(corruptMsg)
+	r.broadcast <- data
+	
+	// Broadcast chat message
+	chatMsg := Message{
+		Type: "CHAT",
+		Data: map[string]interface{}{
+			"username": "System",
+			"text":     "🦠 MALWARE DETECTED - Code corrupted!",
+			"system":   true,
+		},
+	}
+	chatData, _ := json.Marshal(chatMsg)
+	r.broadcast <- chatData
+	
+	// Mark as resolved (it's permanent until they fix it)
 	r.mu.Lock()
-	
-	// Verify player is impostor
-	player := r.players[playerID]
-	if player == nil || player.Role != "IMPOSTOR" {
-		r.mu.Unlock()
-		log.Printf("❌ Non-impostor tried to sabotage: %s", playerID)
-		return
-	}
-	
-	// Check if sabotage already active
-	if r.sabotageActive {
-		r.mu.Unlock()
-		
-		// Send error to impostor
-		errorMsg := Message{
-			Type: "ERROR",
-			Data: map[string]interface{}{
-				"message": "Sabotage already in progress!",
-			},
-		}
-		data, _ := json.Marshal(errorMsg)
-		for client := range r.clients {
-			if client.PlayerID == playerID {
-				client.send <- data
-				break
-			}
-		}
-		return
-	}
-	
-	r.sabotageActive = true
-	r.sabotageType = sabotageType
-	
-	log.Printf("💀 SABOTAGE: %s activated %s", player.Username, sabotageType)
-	
+	r.sabotageActive = false
+	r.sabotageType = ""
 	r.mu.Unlock()
 	
-	switch sabotageType {
-	case "FREEZE":
-		r.handleFreezeSabotage()
-		
-	case "CORRUPT":
-		r.handleCorruptSabotage()
-		
-	default:
-		log.Printf("⚠️ Unknown sabotage type: %s", sabotageType)
-		r.mu.Lock()
-		r.sabotageActive = false
-		r.mu.Unlock()
-	}
+	log.Printf("🦠 CORRUPT sabotage injected - players must remove malware manually")
 }
+

@@ -17,9 +17,11 @@ type GamePhase string
 const (
 	PhaseLobby      GamePhase = "LOBBY"
 	PhaseRoleReveal GamePhase = "ROLE_REVEAL"
-	PhaseCoding     GamePhase = "CODING"
+	PhaseTask1      GamePhase = "TASK_1"
+	PhaseTask2      GamePhase = "TASK_2"
+	PhaseTask3      GamePhase = "TASK_3"
 	PhaseDiscussion GamePhase = "DISCUSSION"
-	PhaseEnd        GamePhase = "END"
+	PhaseEnd        GamePhase = "GAME_OVER"
 )
 
 type Player struct {
@@ -33,8 +35,19 @@ type Player struct {
 
 type Task struct {
 	ID          string `json:"id"`
+	Stage       int    `json:"stage"`
 	Description string `json:"description"`
 	Template    string `json:"template"`
+	Title       string `json:"title"`
+}
+
+type GameState struct {
+	Phase         GamePhase          `json:"phase"`
+	CurrentStage  int                `json:"currentStage"`  // 0=lobby, 1=task1, 2=task2, 3=task3
+	TimerSeconds  int                `json:"timerSeconds"`  // Global countdown
+	ImpostorID    string             `json:"impostorID"`
+	TasksComplete map[int]bool       `json:"tasksComplete"` // Track which stages are done
+	TimerPaused   bool               `json:"timerPaused"`   // For discussion phase
 }
 
 type Room struct {
@@ -42,20 +55,26 @@ type Room struct {
 	clients     map[*Client]bool
 	players     map[string]*Player
 	broadcast   chan []byte
-	phase       GamePhase
-	impostorID  string
-	mode        string
-	task        *Task
-	gameTimer   *time.Timer
 	mu          sync.RWMutex
 	yjsClients  map[*websocket.Conn]bool
 	
-	// Test Execution State Machine
-	testRunning    bool     // Lock flag: is a test currently running?
-	testRunner     string   // ID of player who started the test
-	testRunnerName string   // Username for display
-	testResults    []bool   // Current test results [task1, task2, task3]
-	codeSnapshot   string   // Captured code at test start
+	// Game State Machine
+	gameState   GameState
+	tasks       []*Task // Array of tasks for each stage
+	
+	// Test Execution State
+	testRunning    bool
+	testRunner     string
+	testRunnerName string
+	codeSnapshot   string
+	
+	// Voting System (FIX #2)
+	votes          map[string]string // voterID -> targetID
+	votingActive   bool
+	votingTimer    *time.Timer
+	
+	// Timer Control
+	timerCancel chan bool
 }
 
 func newRoom(id string) *Room {
@@ -64,10 +83,18 @@ func newRoom(id string) *Room {
 		clients:     make(map[*Client]bool),
 		players:     make(map[string]*Player),
 		broadcast:   make(chan []byte, 256),
-		phase:       PhaseLobby,
 		yjsClients:  make(map[*websocket.Conn]bool),
-		testRunning: false,
-		testResults: []bool{false, false, false},
+		gameState: GameState{
+			Phase:         PhaseLobby,
+			CurrentStage:  0,
+			TimerSeconds:  60,
+			TasksComplete: make(map[int]bool),
+			TimerPaused:   false,
+		},
+		testRunning:  false,
+		votes:        make(map[string]string),
+		votingActive: false,
+		timerCancel:  make(chan bool),
 	}
 }
 
@@ -106,15 +133,25 @@ func (r *Room) addPlayer(playerID, username string) {
 	log.Printf("Player %s (%s) added to room %s", username, playerID, r.ID)
 }
 
-func (r *Room) startGame() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+// Replace your startGame() function in room.go with this version
 
-	if len(r.players) < 3 {
-		log.Println("Not enough players to start")
+func (r *Room) startGame() {
+	log.Printf("🎬 [1/10] startGame() CALLED for room %s", r.ID)
+	
+	r.mu.Lock()
+	log.Printf("🎬 [2/10] Mutex LOCKED")
+
+	playerCount := len(r.players)
+	log.Printf("🎬 [3/10] Player count: %d", playerCount)
+
+	if playerCount < 3 {
+		r.mu.Unlock()
+		log.Printf("❌ [ABORT] Not enough players to start (need 3, have %d)", playerCount)
 		return
 	}
 
+	log.Printf("🎬 [4/10] Selecting random impostor...")
+	
 	// Select random impostor
 	playerIDs := make([]string, 0, len(r.players))
 	for id := range r.players {
@@ -123,94 +160,244 @@ func (r *Room) startGame() {
 
 	rand.Seed(time.Now().UnixNano())
 	impostorIdx := rand.Intn(len(playerIDs))
-	r.impostorID = playerIDs[impostorIdx]
+	r.gameState.ImpostorID = playerIDs[impostorIdx]
+
+	log.Printf("🎬 [5/10] Impostor selected: %s", r.gameState.ImpostorID)
 
 	// Assign roles
 	for id, player := range r.players {
-		if id == r.impostorID {
+		if id == r.gameState.ImpostorID {
 			player.Role = "IMPOSTOR"
+			log.Printf("   👹 %s is IMPOSTOR", player.Username)
 		} else {
 			player.Role = "CIVILIAN"
+			log.Printf("   👤 %s is CIVILIAN", player.Username)
 		}
 	}
 
-	r.mode = "OOPS"
-	r.task = r.loadTask()
-	r.phase = PhaseRoleReveal
+	log.Printf("🎬 [6/10] Loading tasks...")
+	
+	// Load all tasks
+	r.tasks = r.loadAllTasks()
+	
+	log.Printf("🎬 [7/10] Tasks loaded: %d tasks", len(r.tasks))
+	
+	// Initialize game state
+	r.gameState.Phase = PhaseRoleReveal
+	r.gameState.CurrentStage = 0
+	r.gameState.TimerSeconds = 60
+	r.gameState.TasksComplete = make(map[int]bool)
 
+	log.Printf("🎬 [8/10] Game state initialized - Phase: %s", r.gameState.Phase)
+
+	r.mu.Unlock()
+	log.Printf("🎬 [9/10] Mutex UNLOCKED")
+
+	log.Printf("🎬 [10/10] Broadcasting ROLE_REVEAL state to all clients...")
 	r.broadcastGameState()
 
-	go func() {
-		time.Sleep(5 * time.Second)
-		r.mu.Lock()
-		r.phase = PhaseCoding
-		r.mu.Unlock()
-		r.broadcastGameState()
+	log.Printf("✅ startGame() COMPLETED - Starting 5-second role reveal timer")
 
-		r.gameTimer = time.NewTimer(10 * time.Minute)
-		go func() {
-			<-r.gameTimer.C
-			r.endGame("IMPOSTOR_WIN_TIME")
-		}()
+	// Role reveal for 5 seconds, then start Task 1
+	go func() {
+		log.Printf("⏱️  [Goroutine] Waiting 5 seconds for role reveal...")
+		time.Sleep(5 * time.Second)
+		
+		log.Printf("⏱️  [Goroutine] Role reveal complete - Transitioning to TASK_1")
+		
+		r.mu.Lock()
+		r.gameState.Phase = PhaseTask1
+		r.gameState.CurrentStage = 1
+		r.mu.Unlock()
+		
+		log.Printf("⏱️  [Goroutine] Broadcasting TASK_1 state...")
+		r.broadcastGameState()
+		
+		log.Printf("⏱️  [Goroutine] Starting global timer...")
+		r.startGlobalTimer()
+		
+		log.Printf("⏱️  [Goroutine] Timer started successfully")
 	}()
 }
 
-func (r *Room) loadTask() *Task {
-	return &Task{
-		ID:          "satellite-rescue",
-		Description: "🛰️ SATELLITE RESCUE MISSION: Fix 3 critical bugs before the satellite crashes! (1) Fix efficiency showing 0.0, (2) Fix altitude not updating, (3) Prevent infinite loop overshoot.",
-		Template: `public class SatelliteSystem {
-    
-    // Class Level Variable
-    static int altitude = 2000; 
+// Global Timer - The "Ticking Bomb"
+func (r *Room) startGlobalTimer() {
+	log.Printf("🕐 Starting global timer for room %s", r.ID)
+	
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		
+		for {
+			select {
+			case <-ticker.C:
+				r.mu.Lock()
+				
+				// Skip tick if timer is paused (during discussion)
+				if r.gameState.TimerPaused {
+					r.mu.Unlock()
+					continue
+				}
+				
+				r.gameState.TimerSeconds--
+				currentTime := r.gameState.TimerSeconds
+				r.mu.Unlock()
+				
+				// Broadcast time sync to all clients
+				msg := Message{
+					Type: "SYNC_TIMER",
+					Data: map[string]interface{}{
+						"timerSeconds": currentTime,
+					},
+				}
+				data, _ := json.Marshal(msg)
+				r.broadcast <- data
+				
+				// Check if time is up
+				if currentTime <= 0 {
+					log.Printf("⏰ Timer expired for room %s - Impostor wins!", r.ID)
+					r.endGame("IMPOSTOR_WIN_TIMEOUT")
+					return
+				}
+				
+			case <-r.timerCancel:
+				log.Printf("⏹️ Timer cancelled for room %s", r.ID)
+				return
+			}
+		}
+	}()
+}
+
+func (r *Room) pauseTimer() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.gameState.TimerPaused = true
+	log.Printf("⏸️ Timer paused for room %s", r.ID)
+}
+
+func (r *Room) resumeTimer() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.gameState.TimerPaused = false
+	log.Printf("▶️ Timer resumed for room %s", r.ID)
+}
+
+func (r *Room) loadAllTasks() []*Task {
+	return []*Task{
+		// Task 1: Engine Room - SportBrakes Bug
+		{
+			ID:    "task1-sportbrakes",
+			Stage: 1,
+			Title: "🔧 ENGINE ROOM - Brake System Failure",
+			Description: "The racing car's brake system is malfunctioning! Fix the constructor to properly initialize SportBrakes.",
+			Template: `public class RacingCar {
+    private String model;
+    private Brakes brakes;
+
+    // [BUG] Constructor should initialize brakes with SportBrakes
+    public RacingCar(String model) {
+        this.model = model;
+        // Missing: this.brakes = new SportBrakes();
+    }
+
+    public void applyBrakes() {
+        if (brakes == null) {
+            System.out.println("ERROR: No brakes installed!");
+        } else {
+            brakes.apply();
+        }
+    }
+}
+
+class Brakes {
+    public void apply() {
+        System.out.println("Standard brakes applied");
+    }
+}
+
+class SportBrakes extends Brakes {
+    @Override
+    public void apply() {
+        System.out.println("Sport brakes applied - HIGH PERFORMANCE!");
+    }
+}`,
+		},
+		
+		// Task 2: Navigation - Satellite Orbit Bug
+		{
+			ID:    "task2-satellite",
+			Stage: 2,
+			Title: "🛰️ NAVIGATION - Satellite Orbit Calculation",
+			Description: "The satellite's orbit calculation is broken! Fix the integer division and variable shadowing bugs.",
+			Template: `public class SatelliteSystem {
+    static int altitude = 2000;
 
     public static void main(String[] args) {
         int targetAltitude = 2050;
         
-        // [TASK 1] The Math Trap: Why is this result 0.0?
-        // We need 50% efficiency (0.5), but integer math is ruining it.
-        double efficiency = 1 / 2; 
+        // [BUG 1] Integer division - should be 0.5, not 0.0
+        double efficiency = 1 / 2;
+        System.out.println("Efficiency: " + efficiency);
 
-        System.out.println("Engine Efficiency: " + efficiency);
-
-        // [TASK 3] The Infinite Loop Trap:
-        // We want to climb while we are BELOW the target.
-        // Currently, '!=' is dangerous because if we step by 20, 
-        // 2000 -> 2020 -> 2040 -> 2060... it never exactly equals 2050!
-        while (altitude != targetAltitude) { 
-            
-            climb(20); // Try to climb by 20 meters
-            
-            System.out.println("Current Altitude: " + altitude);
-            
-            // Failsafe to prevent infinite loop crash in your game
-            if (altitude > 3000) break; 
+        // [BUG 2] Loop condition - should be <, not !=
+        while (altitude != targetAltitude) {
+            climb(20);
+            System.out.println("Altitude: " + altitude);
+            if (altitude > 3000) break;
         }
     }
 
-    // [TASK 2] The Scope Trap (Shadowing):
-    // We are trying to update the class variable 'altitude'.
-    // Look closely at the parameter name vs the class variable name.
+    // [BUG 3] Variable shadowing - parameter hides class variable
     public static void climb(int altitude) {
-        // We are adding 20 to the 'altitude' variable... 
-        // BUT which 'altitude' is being updated?
-        altitude = altitude + 20; 
+        altitude = altitude + 20;
     }
 }`,
+		},
+		
+		// Task 3: Oxygen System - Two-Part Puzzle
+		{
+			ID:    "task3-oxygen",
+			Stage: 3,
+			Title: "💨 OXYGEN SYSTEM - Life Support Critical",
+			Description: "CRITICAL! Fix both the oxygen flow calculation AND the filtration loop logic before the system fails!",
+			Template: `public class OxygenSystem {
+    private int oxygenLevel = 100;
+    private int crew = 5;
+
+    public void distributeOxygen() {
+        // [BUG 1] Integer division - each crew member gets 0 oxygen!
+        int perPerson = oxygenLevel / crew;
+        System.out.println("Oxygen per person: " + perPerson);
+        
+        // [BUG 2] Off-by-one error - should start at 1, not 0
+        for (int i = 0; i <= crew; i++) {
+            System.out.println("Crew " + i + " receiving oxygen...");
+        }
+    }
+
+    public void filterAir(int minutes) {
+        int cyclesNeeded = minutes;
+        int cyclesComplete = 0;
+        
+        // [BUG 3] Infinite loop - cyclesComplete never increments!
+        while (cyclesComplete < cyclesNeeded) {
+            System.out.println("Filtering... Cycle " + cyclesComplete);
+            // Missing: cyclesComplete++;
+        }
+    }
+}`,
+		},
 	}
 }
 
-// Handle test run request with proper locking and state machine
+// Handle test run for current stage
 func (r *Room) handleRunTests(playerID, code string) {
 	r.mu.Lock()
 
-	// CRITICAL: Check if tests are already running (the LOCK)
+	// Check if tests are already running
 	if r.testRunning {
-		player := r.players[playerID]
+		// player := r.players[playerID]
 		r.mu.Unlock()
-		
-		// Send ERROR_BUSY message to the requester
-		log.Printf("Tests already running by %s, rejecting request from %s", r.testRunnerName, player.Username)
 		
 		errorMsg := Message{
 			Type: "ERROR_BUSY",
@@ -220,8 +407,6 @@ func (r *Room) handleRunTests(playerID, code string) {
 			},
 		}
 		data, _ := json.Marshal(errorMsg)
-		
-		// Send only to the requester
 		for client := range r.clients {
 			if client.PlayerID == playerID {
 				client.send <- data
@@ -235,125 +420,383 @@ func (r *Room) handleRunTests(playerID, code string) {
 	player := r.players[playerID]
 	if player == nil || player.IsEliminated {
 		r.mu.Unlock()
-		log.Printf("Eliminated player %s tried to run tests", playerID)
 		return
 	}
 
-	// ACQUIRE THE LOCK: Mark tests as running
+	// Get current stage
+	currentStage := r.gameState.CurrentStage
+	if currentStage < 1 || currentStage > 3 {
+		r.mu.Unlock()
+		log.Printf("Invalid stage: %d", currentStage)
+		return
+	}
+
+	// Acquire lock
 	r.testRunning = true
 	r.testRunner = playerID
 	r.testRunnerName = player.Username
-	r.codeSnapshot = code // Capture code snapshot to prevent cheating
+	r.codeSnapshot = code
 	
 	r.mu.Unlock()
 
-	// Broadcast TEST_LOCKED to ALL clients
+	// Broadcast test locked
 	testLockedMsg := Message{
 		Type: "TEST_LOCKED",
 		Data: map[string]interface{}{
 			"runner":   player.Username,
 			"runnerID": playerID,
+			"stage":    currentStage,
 		},
 	}
 	data, _ := json.Marshal(testLockedMsg)
 	r.broadcast <- data
 
-	log.Printf("🔒 TEST LOCKED: %s is running tests", player.Username)
+	log.Printf("🔒 Stage %d test locked by %s", currentStage, player.Username)
 
-	// Spawn Goroutine for 5-second delay (non-blocking)
+	// Spawn goroutine for test execution
 	go func() {
-		// Wait 5 seconds using time.After (proper Go idiom)
-		<-time.After(5 * time.Second)
+		time.Sleep(5 * time.Second)
 
-		// Validate the CODE SNAPSHOT (not live code)
-		results := validateSatelliteCode(r.codeSnapshot)
+		// Validate code for current stage
+		passed := r.validateStageCode(currentStage, r.codeSnapshot)
 
 		r.mu.Lock()
-		r.testResults = results
-		r.testRunning = false // RELEASE THE LOCK
+		r.testRunning = false
 		r.testRunner = ""
 		r.testRunnerName = ""
 		r.codeSnapshot = ""
 		r.mu.Unlock()
 
-		// Broadcast TEST_COMPLETE with results to ALL clients
+		// Broadcast results
 		testCompleteMsg := Message{
 			Type: "TEST_COMPLETE",
 			Data: map[string]interface{}{
-				"results": results,
-				"runner":  player.Username,
-				"logs": []string{
-					"=== SATELLITE SYSTEM TEST ===",
-					formatTestResult(1, "Engine Efficiency Calculation", results[0]),
-					formatTestResult(2, "Altitude Update Mechanism", results[1]),
-					formatTestResult(3, "Loop Condition Safety", results[2]),
-					"========================",
-				},
+				"passed": passed,
+				"stage":  currentStage,
+				"runner": player.Username,
 			},
 		}
 		data, _ := json.Marshal(testCompleteMsg)
 		r.broadcast <- data
 
-		log.Printf("✅ TEST COMPLETE: Results %v", results)
-
-		// Check win condition: all tests passed
-		allPassed := true
-		for _, result := range results {
-			if !result {
-				allPassed = false
-				break
-			}
-		}
-
-		if allPassed {
-			log.Printf("🎉 All tests passed! Civilians win!")
-			r.endGame("CIVILIAN_WIN_TESTS")
+		// If test passed, advance to next stage
+		if passed {
+			r.advanceStage(currentStage)
 		}
 	}()
 }
 
-// Format test result for terminal display
-func formatTestResult(num int, name string, passed bool) string {
-	status := "❌ FAILED"
-	if passed {
-		status = "✅ PASSED"
+// Validate code for specific stage
+func (r *Room) validateStageCode(stage int, code string) bool {
+	switch stage {
+	case 1: // Task 1: SportBrakes
+		return strings.Contains(code, "new SportBrakes()")
+	
+	case 2: // Task 2: Satellite
+		hasEfficiency := strings.Contains(code, "1.0 / 2") || strings.Contains(code, "1 / 2.0") || strings.Contains(code, "= 0.5")
+		hasLoop := strings.Contains(code, "while (altitude < targetAltitude)") || strings.Contains(code, "while(altitude<targetAltitude)")
+		hasClimb := strings.Contains(code, "climb(int amount)") || strings.Contains(code, "climb(int step)") || strings.Contains(code, "SatelliteSystem.altitude")
+		return hasEfficiency && hasLoop && hasClimb
+	
+	case 3: // Task 3: Oxygen (two bugs minimum)
+		hasDistribution := strings.Contains(code, "double perPerson") || strings.Contains(code, "(double)oxygenLevel")
+		hasLoopFix := strings.Contains(code, "i = 1") || strings.Contains(code, "i < crew")
+		hasIncrement := strings.Contains(code, "cyclesComplete++") || strings.Contains(code, "cyclesComplete = cyclesComplete + 1")
+		bugsFixed := 0
+		if hasDistribution { bugsFixed++ }
+		if hasLoopFix { bugsFixed++ }
+		if hasIncrement { bugsFixed++ }
+		return bugsFixed >= 2 // Need at least 2 of 3 bugs fixed
+	
+	default:
+		return false
 	}
-	return "Task " + string(rune('0'+num)) + ": " + name + " ... " + status
 }
 
-// Validate satellite code using static analysis
-func validateSatelliteCode(code string) []bool {
-	results := []bool{false, false, false}
+// Advance to next stage - THE SYNCHRONIZED CONVEYOR BELT
+func (r *Room) advanceStage(completedStage int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-	// TASK 1: Fix integer division (efficiency should be 0.5, not 0.0)
-	// Look for: 1.0 / 2, 1 / 2.0, or direct assignment = 0.5
-	if strings.Contains(code, "1.0 / 2") || 
-	   strings.Contains(code, "1 / 2.0") || 
-	   strings.Contains(code, "1.0/2") || 
-	   strings.Contains(code, "1/2.0") || 
-	   strings.Contains(code, "= 0.5") {
-		results[0] = true
+	// Mark stage as complete
+	r.gameState.TasksComplete[completedStage] = true
+	
+	log.Printf("✅ Stage %d completed!", completedStage)
+
+	// Determine next phase
+	if completedStage == 3 {
+		// All tasks complete - Crewmates win!
+		r.gameState.Phase = PhaseEnd
+		r.mu.Unlock()
+		r.endGame("CIVILIAN_WIN_TASKS")
+		return
 	}
 
-	// TASK 2: Fix variable shadowing
-	// Check if climb method parameter is NOT named 'altitude'
-	// OR if code uses SatelliteSystem.altitude
-	if strings.Contains(code, "climb(int amount)") ||
-	   strings.Contains(code, "climb(int step)") ||
-	   strings.Contains(code, "climb(int increment)") ||
-	   strings.Contains(code, "climb(int meters)") ||
-	   strings.Contains(code, "SatelliteSystem.altitude") {
-		results[1] = true
+	// Broadcast stage transition
+	nextStage := completedStage + 1
+	msg := Message{
+		Type: "CHANGE_SCENE",
+		Data: map[string]interface{}{
+			"fromStage": completedStage,
+			"toStage":   nextStage,
+			"delay":     3000, // 3 second transition
+		},
 	}
+	data, _ := json.Marshal(msg)
+	r.broadcast <- data
 
-	// TASK 3: Fix infinite loop (while condition should be < not !=)
-	if strings.Contains(code, "while (altitude < targetAltitude)") ||
-	   strings.Contains(code, "while(altitude<targetAltitude)") ||
-	   strings.Contains(code, "while ( altitude < targetAltitude )") {
-		results[2] = true
+	log.Printf("🚀 Transitioning from Stage %d to Stage %d", completedStage, nextStage)
+
+	// Schedule actual phase change after transition
+	go func() {
+		time.Sleep(3 * time.Second)
+		
+		r.mu.Lock()
+		r.gameState.CurrentStage = nextStage
+		
+		switch nextStage {
+		case 2:
+			r.gameState.Phase = PhaseTask2
+		case 3:
+			r.gameState.Phase = PhaseTask3
+		}
+		r.mu.Unlock()
+		
+		r.broadcastGameState()
+		log.Printf("📍 Now on Stage %d", nextStage)
+	}()
+}
+
+// FIX #6: Start discussion with auto-resume
+func (r *Room) startDiscussion() {
+	r.mu.Lock()
+	r.gameState.TimerPaused = true
+	r.gameState.Phase = PhaseDiscussion
+	r.votes = make(map[string]string) // Reset votes
+	r.votingActive = true
+	r.mu.Unlock()
+	
+	r.broadcastGameState()
+	
+	log.Printf("🗣️ Discussion started in room %s - Timer paused", r.ID)
+	
+	// FIX #7: Server-controlled voting timer (30 seconds)
+	votingDuration := 30
+	
+	// Broadcast countdown to all clients
+	go func() {
+		for i := votingDuration; i > 0; i-- {
+			time.Sleep(1 * time.Second)
+			
+			r.mu.RLock()
+			stillVoting := r.gameState.Phase == PhaseDiscussion
+			r.mu.RUnlock()
+			
+			if !stillVoting {
+				return // Voting ended early
+			}
+			
+			msg := Message{
+				Type: "VOTING_TIMER",
+				Data: map[string]interface{}{
+					"seconds": i,
+				},
+			}
+			data, _ := json.Marshal(msg)
+			r.broadcast <- data
+		}
+		
+		// Time's up - auto-resolve voting
+		r.mu.Lock()
+		if r.gameState.Phase == PhaseDiscussion {
+			log.Printf("⏰ Voting timeout - tallying votes")
+			r.mu.Unlock()
+			r.tallyVotes()
+		} else {
+			r.mu.Unlock()
+		}
+	}()
+}
+
+// FIX #2: Implement vote aggregation system
+func (r *Room) handleVote(voterID, targetID string) {
+	r.mu.Lock()
+	
+	// Store vote
+	r.votes[voterID] = targetID
+	
+	log.Printf("🗳️ Player %s voted for %s", voterID, targetID)
+	
+	// Broadcast vote update to show who has voted (but not who they voted for)
+	voteStatus := make(map[string]bool)
+	for vid := range r.votes {
+		voteStatus[vid] = true
 	}
+	
+	r.mu.Unlock()
+	
+	msg := Message{
+		Type: "VOTE_UPDATE",
+		Data: map[string]interface{}{
+			"hasVoted": voteStatus,
+		},
+	}
+	data, _ := json.Marshal(msg)
+	r.broadcast <- data
+	
+	// Check if all alive players have voted
+	r.mu.RLock()
+	aliveCount := 0
+	for _, p := range r.players {
+		if !p.IsEliminated {
+			aliveCount++
+		}
+	}
+	voteCount := len(r.votes)
+	r.mu.RUnlock()
+	
+	if voteCount >= aliveCount {
+		log.Printf("✅ All players voted (%d/%d) - tallying now", voteCount, aliveCount)
+		r.tallyVotes()
+	}
+}
 
-	return results
+// FIX #2: Tally votes and determine outcome
+func (r *Room) tallyVotes() {
+	r.mu.Lock()
+	
+	if !r.votingActive {
+		r.mu.Unlock()
+		return // Already processed
+	}
+	
+	r.votingActive = false
+	
+	// Count votes for each target
+	voteCounts := make(map[string]int)
+	for _, targetID := range r.votes {
+		voteCounts[targetID]++
+	}
+	
+	// Find player with most votes
+	maxVotes := 0
+	var eliminated string
+	
+	for targetID, count := range voteCounts {
+		if count > maxVotes {
+			maxVotes = count
+			eliminated = targetID
+		} else if count == maxVotes && targetID != eliminated {
+			// Tie - no one eliminated
+			eliminated = ""
+		}
+	}
+	
+	isImpostor := eliminated == r.gameState.ImpostorID
+	
+	// Get eliminated player name BEFORE unlocking
+	var eliminatedName string
+	if eliminated != "" && eliminated != "SKIP" {
+		if player, exists := r.players[eliminated]; exists {
+			eliminatedName = player.Username
+		}
+	}
+	
+	r.mu.Unlock()
+	
+	// Broadcast vote results
+	resultMsg := Message{
+		Type: "VOTE_RESULT",
+		Data: map[string]interface{}{
+			"eliminated":  eliminated,
+			"voteCounts":  voteCounts,
+			"wasImpostor": isImpostor,
+		},
+	}
+	data, _ := json.Marshal(resultMsg)
+	r.broadcast <- data
+	
+	// Wait 2 seconds to show results
+	time.Sleep(2 * time.Second)
+	
+	// Handle outcome
+	if eliminated == "" || eliminated == "SKIP" {
+		// No elimination or skip vote won
+		log.Printf("⏭️ No one eliminated - resuming game")
+		
+		// Send chat message
+		chatMsg := Message{
+			Type: "CHAT",
+			Data: map[string]interface{}{
+				"username": "System",
+				"text":     "No one was eliminated. The crew continues...",
+				"system":   true,
+			},
+		}
+		chatData, _ := json.Marshal(chatMsg)
+		r.broadcast <- chatData
+		
+		r.resumeGameAfterVoting()
+		
+		// Reset votes
+		r.mu.Lock()
+		r.votes = make(map[string]string)
+		r.mu.Unlock()
+		return
+	}
+	
+	// Eliminate player
+	r.eliminatePlayer(eliminated)
+	
+	// Send elimination chat message with correct name
+	chatMsg := Message{
+		Type: "CHAT",
+		Data: map[string]interface{}{
+			"username": "System",
+			"text":     eliminatedName + " was eliminated!",
+			"system":   true,
+		},
+	}
+	chatData, _ := json.Marshal(chatMsg)
+	r.broadcast <- chatData
+	
+	// Wait another second for elimination message to be seen
+	time.Sleep(1 * time.Second)
+	
+	if isImpostor {
+		// Voted out the impostor - Crewmates win!
+		log.Printf("🎉 Impostor eliminated - Crewmates win!")
+		r.endGame("CIVILIAN_WIN_VOTE")
+	} else {
+		// Wrong vote - Resume game
+		log.Printf("😢 Wrong vote - game continues")
+		r.resumeGameAfterVoting()
+	}
+	
+	// Reset votes
+	r.mu.Lock()
+	r.votes = make(map[string]string)
+	r.mu.Unlock()
+}
+
+func (r *Room) resumeGameAfterVoting() {
+	r.resumeTimer()
+	
+	r.mu.Lock()
+	currentStage := r.gameState.CurrentStage
+	switch currentStage {
+	case 1:
+		r.gameState.Phase = PhaseTask1
+	case 2:
+		r.gameState.Phase = PhaseTask2
+	case 3:
+		r.gameState.Phase = PhaseTask3
+	default:
+		r.gameState.Phase = PhaseTask1
+	}
+	r.mu.Unlock()
+	
+	r.broadcastGameState()
 }
 
 func (r *Room) eliminatePlayer(playerID string) {
@@ -363,62 +806,90 @@ func (r *Room) eliminatePlayer(playerID string) {
 	if player, exists := r.players[playerID]; exists {
 		player.IsEliminated = true
 		player.IsAlive = false
-
-		if playerID == r.impostorID {
-			r.phase = PhaseEnd
-			r.broadcastGameState()
-			go r.endGame("CIVILIAN_WIN")
-			return
+		
+		// Broadcast elimination
+		elimMsg := Message{
+			Type: "PLAYER_ELIMINATED",
+			Data: map[string]interface{}{
+				"playerID": playerID,
+				"username": player.Username,
+			},
 		}
-
-		aliveCivilians := 0
-		for _, p := range r.players {
-			if p.IsAlive && p.Role == "CIVILIAN" {
-				aliveCivilians++
-			}
-		}
-
-		if aliveCivilians == 0 {
-			r.phase = PhaseEnd
-			go r.endGame("IMPOSTOR_WIN")
-			return
-		}
-
-		r.phase = PhaseCoding
-		r.broadcastGameState()
+		data, _ := json.Marshal(elimMsg)
+		r.broadcast <- data
 	}
 }
 
 func (r *Room) endGame(reason string) {
+	log.Printf("🏁 [endGame] Starting game end sequence - Reason: %s", reason)
+	
+	// Cancel timer
+	select {
+	case r.timerCancel <- true:
+		log.Printf("🏁 [endGame] Timer cancelled")
+	default:
+		log.Printf("🏁 [endGame] Timer already stopped")
+	}
+	
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.gameState.Phase = "GAME_OVER"  // Use string literal instead of const
+	impostorID := r.gameState.ImpostorID
+	log.Printf("🏁 [endGame] Phase set to GAME_OVER, Impostor was: %s", impostorID)
+	r.mu.Unlock()
 
-	r.phase = PhaseEnd
-
+	// First, broadcast GAME_ENDED message with reason and impostor
 	msg := Message{
 		Type: "GAME_ENDED",
 		Data: map[string]interface{}{
 			"reason":     reason,
-			"impostorID": r.impostorID,
+			"impostorID": impostorID,
 		},
 	}
 
 	data, _ := json.Marshal(msg)
+	log.Printf("🏁 [endGame] Broadcasting GAME_ENDED message")
 	r.broadcast <- data
+	
+	// Small delay to ensure message is received
+	time.Sleep(500 * time.Millisecond)
+	
+	// Then broadcast final game state
+	log.Printf("🏁 [endGame] Broadcasting final GAME_STATE")
+	r.broadcastGameState()
+	
+	log.Printf("✅ [endGame] Game ended: %s", reason)
 }
+// Replace your broadcastGameState() function in room.go with this version
 
 func (r *Room) broadcastGameState() {
+	r.mu.RLock()
+	
+	log.Printf("📡 [broadcastGameState] Starting broadcast for room %s", r.ID)
+	log.Printf("📡 [broadcastGameState] Current phase: %s", r.gameState.Phase)
+	log.Printf("📡 [broadcastGameState] Current stage: %d", r.gameState.CurrentStage)
+	log.Printf("📡 [broadcastGameState] Connected clients: %d", len(r.clients))
+	
+	// Get current task
+	var currentTask *Task
+	if r.gameState.CurrentStage >= 1 && r.gameState.CurrentStage <= 3 {
+		currentTask = r.tasks[r.gameState.CurrentStage-1]
+		log.Printf("📡 [broadcastGameState] Current task: %s", currentTask.Title)
+	} else {
+		log.Printf("📡 [broadcastGameState] No current task (stage %d)", r.gameState.CurrentStage)
+	}
+	
 	state := map[string]interface{}{
-		"phase":       r.phase,
-		"players":     r.players,
-		"mode":        r.mode,
-		"testResults": r.testResults,
-		"testRunning": r.testRunning,
-		"testRunner":  r.testRunnerName,
+		"phase":         r.gameState.Phase,
+		"currentStage":  r.gameState.CurrentStage,
+		"timerSeconds":  r.gameState.TimerSeconds,
+		"tasksComplete": r.gameState.TasksComplete,
+		"players":       r.players,
+		"testRunning":   r.testRunning,
+		"testRunner":    r.testRunnerName,
 	}
 
-	if r.task != nil {
-		state["task"] = r.task
+	if currentTask != nil {
+		state["task"] = currentTask
 	}
 
 	msg := Message{
@@ -426,8 +897,22 @@ func (r *Room) broadcastGameState() {
 		Data: state,
 	}
 
-	data, _ := json.Marshal(msg)
+	data, err := json.Marshal(msg)
+	if err != nil {
+		log.Printf("❌ [broadcastGameState] Error marshaling: %v", err)
+		r.mu.RUnlock()
+		return
+	}
+
+	log.Printf("📡 [broadcastGameState] Message marshaled successfully (%d bytes)", len(data))
+	log.Printf("📡 [broadcastGameState] Message type: GAME_STATE")
+	
+	r.mu.RUnlock()
+
+	// Send to broadcast channel
+	log.Printf("📡 [broadcastGameState] Sending to broadcast channel...")
 	r.broadcast <- data
+	log.Printf("✅ [broadcastGameState] Broadcast complete!")
 }
 
 func (r *Room) broadcastPlayerList() {
@@ -438,19 +923,6 @@ func (r *Room) broadcastPlayerList() {
 
 	data, _ := json.Marshal(msg)
 	r.broadcast <- data
-}
-
-func (r *Room) startDiscussion() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	r.phase = PhaseDiscussion
-	r.broadcastGameState()
-}
-
-func (r *Room) handleVote(voterID, targetID string) {
-	log.Printf("Player %s voted for %s", voterID, targetID)
-	r.eliminatePlayer(targetID)
 }
 
 func (h *Hub) handleYjsConnection(w http.ResponseWriter, r *http.Request, conn *websocket.Conn) {

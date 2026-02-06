@@ -9,11 +9,10 @@ export default function Discussion({ onVote }) {
   const { state, dispatch } = useGame();
   const { t } = useTranslation(state.language);
   const [selectedTarget, setSelectedTarget] = useState(null);
-  const [timeLeft, setTimeLeft] = useState(10);
+  const [timeLeft, setTimeLeft] = useState(30); // FIX #7: Default 30 seconds
   const [hasVoted, setHasVoted] = useState(false);
   const [chatMessage, setChatMessage] = useState('');
   const chatEndRef = useRef(null);
-  const timerRef = useRef(null);
 
   const playerList = Object.values(state.players || {}).filter(p => !p.isEliminated);
   const currentPlayer = state.players?.[state.playerId];
@@ -24,32 +23,39 @@ export default function Discussion({ onVote }) {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [state.messages]);
 
-  // Countdown Timer
+  // FIX #7: Listen to server-controlled voting timer
+  useEffect(() => {
+    if (!state.ws) return;
+
+    const handleMessage = (event) => {
+      try {
+        const message = JSON.parse(event.data);
+        
+        if (message.type === 'VOTING_TIMER') {
+          setTimeLeft(message.data.seconds);
+          
+          // Auto-submit skip if time runs out and haven't voted
+          if (message.data.seconds === 0 && !hasVoted) {
+            handleVoteSubmit('SKIP');
+          }
+        }
+      } catch (error) {
+        console.error('Error parsing voting timer message:', error);
+      }
+    };
+
+    state.ws.addEventListener('message', handleMessage);
+    return () => {
+      state.ws?.removeEventListener('message', handleMessage);
+    };
+  }, [state.ws, hasVoted]);
+
+  // Reset state when entering discussion phase
   useEffect(() => {
     if (state.phase === 'DISCUSSION') {
-      setTimeLeft(10);
       setHasVoted(false);
       setSelectedTarget(null);
-
-      timerRef.current = setInterval(() => {
-        setTimeLeft((prev) => {
-          if (prev <= 1) {
-            clearInterval(timerRef.current);
-            // Auto-submit skip vote if haven't voted
-            if (!hasVoted) {
-              handleVoteSubmit('SKIP');
-            }
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000);
-
-      return () => {
-        if (timerRef.current) {
-          clearInterval(timerRef.current);
-        }
-      };
+      setTimeLeft(30);
     }
   }, [state.phase]);
 
@@ -60,10 +66,9 @@ export default function Discussion({ onVote }) {
     onVote(targetID);
   };
 
-  // Helper to count votes for a specific player ID
-  const getVoteCount = (pid) => {
-    if (!state.votes) return 0;
-    return Object.values(state.votes).filter(target => target === pid).length;
+  // Helper to check if a player has voted (from vote updates)
+  const hasPlayerVoted = (playerId) => {
+    return state.votesStatus?.[playerId] || false;
   };
 
   const handleSendMessage = () => {
@@ -131,12 +136,13 @@ export default function Discussion({ onVote }) {
                         </span>
                       </div>
                       
-                      {/* Vote Indicators (Red Dots) */}
-                      <div className="flex gap-1">
-                        {[...Array(getVoteCount(player.id))].map((_, i) => (
-                          <div key={i} className="w-4 h-4 bg-red-600 rounded-full border-2 border-brown-dark"></div>
-                        ))}
-                      </div>
+                      {/* Vote Indicator (Shows if this player has voted, not who they voted for) */}
+                      {hasPlayerVoted(player.id) && (
+                        <div className="flex items-center gap-1">
+                          <div className="w-3 h-3 bg-green-600 rounded-full border-2 border-brown-dark"></div>
+                          <span className="font-pixel text-xs text-gray-600">VOTED</span>
+                        </div>
+                      )}
                     </motion.button>
                   ))}
                 </div>
@@ -158,9 +164,19 @@ export default function Discussion({ onVote }) {
                     className={`btn-space blue flex-1 ${!canVote ? 'opacity-50 cursor-not-allowed' : ''}`}
                     whileHover={canVote ? { scale: 1.02 } : {}}
                   >
-                    SKIP ({getVoteCount('SKIP')})
+                    SKIP
                   </motion.button>
                 </div>
+
+                {hasVoted && (
+                  <motion.p
+                    initial={{ opacity: 0, y: -10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="text-center mt-4 font-game text-xl text-gray-700"
+                  >
+                    ✅ Your vote has been recorded. Waiting for other players...
+                  </motion.p>
+                )}
               </div>
             </div>
 

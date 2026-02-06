@@ -21,7 +21,7 @@ export function useWebSocket(roomId) {
     ws.onmessage = (event) => {
       try {
         const message = JSON.parse(event.data);
-        console.log('📨 Received message:', message.type, message);
+        console.log('📨 Received message:', message.type);
 
         switch (message.type) {
           case 'INIT':
@@ -29,7 +29,7 @@ export function useWebSocket(roomId) {
             dispatch({ type: 'SET_PLAYER_ID', payload: message.data.playerID });
             dispatch({ type: 'SET_ROOM_ID', payload: message.data.roomID });
             
-            // CRITICAL: Send JOIN message immediately after INIT
+            // Send JOIN message
             const username = state.username || localStorage.getItem('username');
             console.log('📤 Sending JOIN with username:', username);
             
@@ -60,8 +60,33 @@ export function useWebSocket(roomId) {
             break;
 
           case 'GAME_STATE':
-            console.log('🎮 GAME_STATE received - Phase:', message.data.phase);
-            dispatch({ type: 'SET_GAME_STATE', payload: message.data });
+    console.log('=' .repeat(80));
+    console.log('🎮 GAME_STATE MESSAGE RECEIVED');
+    console.log('=' .repeat(80));
+    console.log('Full message data:', JSON.stringify(message.data, null, 2));
+    console.log('Phase:', message.data.phase);
+    console.log('Current Stage:', message.data.currentStage);
+    console.log('Timer Seconds:', message.data.timerSeconds);
+    console.log('Players:', Object.keys(message.data.players || {}).length);
+    console.log('Task:', message.data.task ? message.data.task.title : 'No task');
+    console.log('Test Running:', message.data.testRunning);
+    console.log('-'.repeat(80));
+    
+    console.log('🔄 Dispatching SET_GAME_STATE action...');
+    dispatch({ type: 'SET_GAME_STATE', payload: message.data });
+    console.log('✅ Dispatch complete');
+    console.log('=' .repeat(80));
+    break
+
+          // Multi-stage events
+          case 'SYNC_TIMER':
+            console.log('⏱️ SYNC_TIMER:', message.data.timerSeconds, 'seconds');
+            dispatch({ type: 'SYNC_TIMER', payload: message.data });
+            break;
+
+          case 'CHANGE_SCENE':
+            console.log('🚀 CHANGE_SCENE: Stage', message.data.fromStage, '→', message.data.toStage);
+            dispatch({ type: 'CHANGE_SCENE', payload: message.data });
             break;
 
           case 'VOTE_UPDATE':
@@ -84,7 +109,7 @@ export function useWebSocket(roomId) {
 
           // Test execution events
           case 'TEST_LOCKED':
-            console.log('🔒 TEST_LOCKED received:', message.data);
+            console.log('🔒 TEST_LOCKED received - Stage:', message.data.stage);
             dispatch({ 
               type: 'TEST_LOCKED', 
               payload: message.data 
@@ -92,7 +117,7 @@ export function useWebSocket(roomId) {
             break;
 
           case 'TEST_COMPLETE':
-            console.log('✅ TEST_COMPLETE received:', message.data);
+            console.log('✅ TEST_COMPLETE - Stage:', message.data.stage, 'Passed:', message.data.passed);
             dispatch({ 
               type: 'TEST_COMPLETE', 
               payload: message.data 
@@ -115,13 +140,24 @@ export function useWebSocket(roomId) {
             });
             break;
 
+          case 'PLAYER_ELIMINATED':
+            console.log('💀 PLAYER_ELIMINATED:', message.data.username);
+            dispatch({ 
+              type: 'ADD_MESSAGE', 
+              payload: { 
+                text: `${message.data.username} was eliminated!`,
+                system: true 
+              } 
+            });
+            break;
+
           case 'CHAT':
             dispatch({ type: 'ADD_MESSAGE', payload: message.data });
             break;
 
           case 'GAME_ENDED':
             console.log('🏁 GAME_ENDED:', message.data.reason);
-            dispatch({ type: 'SET_PHASE', payload: 'END' });
+            dispatch({ type: 'SET_PHASE', payload: 'GAME_OVER' });
             dispatch({ 
               type: 'ADD_MESSAGE', 
               payload: { 
@@ -134,10 +170,19 @@ export function useWebSocket(roomId) {
           default:
             console.warn('⚠️ Unknown message type:', message.type);
         }
+
+        console.log('📊 Current state after message:', {
+    phase: state.phase,
+    currentStage: state.currentStage,
+    role: state.role,
+    playerId: state.playerId
+});
       } catch (error) {
         console.error('❌ Error parsing message:', error);
       }
     };
+
+
 
     ws.onerror = (error) => {
       console.error('❌ WebSocket error:', error);
@@ -157,11 +202,11 @@ export function useWebSocket(roomId) {
         ws.close();
       }
     };
-  }, [roomId]); // Only roomId as dependency
+  }, [roomId]);
 
   const sendMessage = useCallback((type, data) => {
     if (state.ws && state.ws.readyState === WebSocket.OPEN) {
-      console.log('📤 Sending message:', type, data);
+      console.log('📤 Sending message:', type);
       state.ws.send(JSON.stringify({ type, data }));
     } else {
       console.error('❌ Cannot send message - WebSocket not ready');

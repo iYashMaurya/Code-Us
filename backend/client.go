@@ -158,6 +158,7 @@ func (c *Client) handleMessage(message []byte) {
 		return
 	}
 
+	// CRITICAL: Get room reference at the start
 	room := c.hub.getRoom(c.RoomID)
 	if room == nil {
 		log.Printf("Room %s not found", c.RoomID)
@@ -194,13 +195,46 @@ func (c *Client) handleMessage(message []byte) {
 		}
 
 	case "START_GAME":
+		// FIXED: Add comprehensive logging and explicit checks
+		log.Printf("🎮 START_GAME received from %s (PlayerID: %s, RoomID: %s)", 
+			c.Username, c.PlayerID, c.RoomID)
+
 		room.mu.RLock()
 		player := room.players[c.PlayerID]
 		room.mu.RUnlock()
 
-		if player != nil && player.IsHost {
-			room.startGame()
+		if player == nil {
+			log.Printf("❌ START_GAME rejected: Player %s not found in room %s", c.PlayerID, c.RoomID)
+			
+			// Send error to client
+			errorMsg := Message{
+				Type: "ERROR",
+				Data: map[string]interface{}{
+					"message": "Player not found in room",
+				},
+			}
+			errData, _ := json.Marshal(errorMsg)
+			c.send <- errData
+			return
 		}
+
+		if !player.IsHost {
+			log.Printf("❌ START_GAME rejected: Player %s (%s) is not host", player.Username, c.PlayerID)
+			
+			// Send error to client
+			errorMsg := Message{
+				Type: "ERROR",
+				Data: map[string]interface{}{
+					"message": "Only the host can start the game",
+				},
+			}
+			errData, _ := json.Marshal(errorMsg)
+			c.send <- errData
+			return
+		}
+
+		log.Printf("✅ START_GAME authorized - Starting game in room %s", c.RoomID)
+		room.startGame()
 
 	case "RUN_TESTS":
 		data, ok := msg.Data.(map[string]interface{})
@@ -221,6 +255,7 @@ func (c *Client) handleMessage(message []byte) {
 		}
 
 	case "EMERGENCY":
+		log.Printf("🚨 EMERGENCY button pressed by %s", c.Username)
 		room.startDiscussion()
 
 	case "VOTE":
@@ -230,9 +265,10 @@ func (c *Client) handleMessage(message []byte) {
 		}
 
 		targetID, _ := data["targetID"].(string)
+		log.Printf("🗳️ Vote received: %s voted for %s", c.PlayerID, targetID)
 		room.handleVote(c.PlayerID, targetID)
 
 	default:
-		log.Printf("Unknown message type: %s", msg.Type)
+		log.Printf("⚠️ Unknown message type: %s", msg.Type)
 	}
 }

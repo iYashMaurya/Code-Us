@@ -5,7 +5,7 @@ import { useTranslation } from '../utils/translations';
 import { motion, AnimatePresence } from 'framer-motion';
 import Starfield from './Starfield';
 import Ship, { getShipType } from './Ship';
-import { CheckCircle2, XCircle, Zap, Radio, Clock, Loader2, Terminal } from 'lucide-react';
+import { CheckCircle2, XCircle, Zap, Radio, Clock, Loader2, Terminal, AlertTriangle } from 'lucide-react';
 import * as Y from 'yjs';
 import { WebsocketProvider } from 'y-websocket';
 import { MonacoBinding } from 'y-monaco';
@@ -16,7 +16,6 @@ export default function CodeEditor({ onEmergency }) {
   const editorRef = useRef(null);
   const [chatMessage, setChatMessage] = useState('');
   const [sabotages, setSabotages] = useState({ oxygen: false, sensors: false });
-  const [timeLeft, setTimeLeft] = useState(600);
   const chatEndRef = useRef(null);
   const terminalEndRef = useRef(null);
   
@@ -30,34 +29,18 @@ export default function CodeEditor({ onEmergency }) {
   const eliminatedPlayers = playerList.filter(p => p.isEliminated);
   const isImpostor = state.role === 'IMPOSTOR';
 
-  // Derived state from context
+  // Derived state
   const isTerminalBusy = state.isTerminalBusy;
   const currentRunner = state.currentRunner;
-  const testProgress = state.testProgress;
   const terminalLogs = state.terminalLogs;
-
-  // Check if current player is the one running tests
   const isMyTest = state.currentRunnerID === state.playerId;
+  
+  // Multi-stage state
+  const currentStage = state.currentStage;
+  const timerSeconds = state.timerSeconds;
+  const tasksComplete = state.tasksComplete;
 
-  // Timer countdown
-  useEffect(() => {
-    if (state.phase === 'CODING') {
-      const timer = setInterval(() => {
-        setTimeLeft((prev) => {
-          if (prev <= 1) {
-            clearInterval(timer);
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000);
-
-      return () => clearInterval(timer);
-    } else {
-      setTimeLeft(600);
-    }
-  }, [state.phase]);
-
+  // Scroll effects
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [state.messages]);
@@ -66,55 +49,71 @@ export default function CodeEditor({ onEmergency }) {
     terminalEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [terminalLogs]);
 
-  // Yjs initialization
+  // FIX #5: Improved Yjs initialization with proper stage synchronization
   useEffect(() => {
-    if (!state.roomId || !editorReady || !editorRef.current) {
-      console.log('⏳ Waiting for editor...', { 
-        roomId: state.roomId, 
-        editorReady, 
-        hasEditor: !!editorRef.current 
-      });
+    if (!state.roomId || !editorReady || !editorRef.current || !state.task) {
       return;
     }
 
+    // Clean up previous Yjs connection
     if (yjsProviderRef.current) {
-      console.log('✅ Yjs already initialized, skipping');
-      return;
+      console.log('🧹 Cleaning up previous Yjs connection');
+      if (yjsBindingRef.current) {
+        yjsBindingRef.current.destroy();
+        yjsBindingRef.current = null;
+      }
+      if (yjsProviderRef.current) {
+        yjsProviderRef.current.disconnect();
+        yjsProviderRef.current.destroy();
+        yjsProviderRef.current = null;
+      }
+      if (yjsDocRef.current) {
+        yjsDocRef.current.destroy();
+        yjsDocRef.current = null;
+      }
     }
 
-    console.log('🔄 Initializing Yjs for room:', state.roomId);
+    console.log('🔄 Initializing Yjs for Stage', currentStage);
 
     const doc = new Y.Doc();
     yjsDocRef.current = doc;
     
+    // Use stage-specific room ID for Yjs
+    const yjsRoomId = `${state.roomId}-stage${currentStage}`;
     const wsUrl = 'ws://localhost:8080/yjs';
-    console.log('🔌 Connecting to:', wsUrl);
     
     const provider = new WebsocketProvider(
       wsUrl,
-      state.roomId,
+      yjsRoomId,
       doc,
       {
         connect: true,
-        params: { room: state.roomId }
+        params: { room: yjsRoomId }
       }
     );
     yjsProviderRef.current = provider;
 
-    provider.on('status', event => {
-      console.log('📡 Yjs connection status:', event.status);
-    });
-
-    provider.on('sync', isSynced => {
-      console.log('🔄 Yjs synced:', isSynced);
-    });
-
     const yText = doc.getText('monaco');
     
-    if (state.task?.template && yText.toString() === '') {
-      console.log('📝 Setting initial template');
-      yText.insert(0, state.task.template);
-    }
+    // FIX #5: Use provider.on('sync') to ensure proper initialization
+    let templateLoaded = false;
+    
+    provider.on('sync', (isSynced) => {
+      if (isSynced && !templateLoaded && yText.toString() === '') {
+        console.log('📝 Setting initial template for Stage', currentStage);
+        yText.insert(0, state.task.template);
+        templateLoaded = true;
+      }
+    });
+    
+    // Also handle case where we're first to connect (immediate sync)
+    setTimeout(() => {
+      if (!templateLoaded && yText.toString() === '') {
+        console.log('📝 Setting initial template (first connection) for Stage', currentStage);
+        yText.insert(0, state.task.template);
+        templateLoaded = true;
+      }
+    }, 500);
 
     const model = editorRef.current.getModel();
     if (!model) {
@@ -122,7 +121,7 @@ export default function CodeEditor({ onEmergency }) {
       return;
     }
 
-    console.log('🔗 Creating Monaco binding');
+    console.log('🔗 Creating Monaco binding for Stage', currentStage);
     const binding = new MonacoBinding(
       yText,
       model,
@@ -140,10 +139,8 @@ export default function CodeEditor({ onEmergency }) {
       colorLight: userColor + '80',
     });
 
-    console.log('✅ Yjs initialization complete!');
-
     return () => {
-      console.log('🧹 Cleaning up Yjs connection');
+      console.log('🧹 Cleaning up Yjs connection for Stage', currentStage);
       
       if (yjsBindingRef.current) {
         yjsBindingRef.current.destroy();
@@ -161,15 +158,13 @@ export default function CodeEditor({ onEmergency }) {
         yjsDocRef.current = null;
       }
     };
-  }, [state.roomId, editorReady, state.task?.template, state.playerId, state.username]);
+  }, [state.roomId, editorReady, state.task?.id, currentStage, state.playerId, state.username]);
 
   useEffect(() => {
     if (!editorRef.current) return;
 
     if (state.isEliminated) {
-      console.log('👻 Player eliminated, setting read-only');
       editorRef.current.updateOptions({ readOnly: true });
-      
       if (yjsProviderRef.current) {
         yjsProviderRef.current.awareness.setLocalState(null);
       }
@@ -211,14 +206,13 @@ export default function CodeEditor({ onEmergency }) {
     setSabotages(prev => ({ ...prev, [type]: !prev[type] }));
   };
 
-  // Send RUN_TESTS message to server
   const handleRunTests = () => {
     if (isTerminalBusy || state.isEliminated) return;
 
     const code = editorRef.current?.getValue() || '';
     
     if (state.ws && state.ws.readyState === WebSocket.OPEN) {
-      console.log('📤 Sending RUN_TESTS request');
+      console.log('📤 Sending RUN_TESTS request for Stage', currentStage);
       state.ws.send(JSON.stringify({
         type: 'RUN_TESTS',
         data: { code }
@@ -237,11 +231,14 @@ export default function CodeEditor({ onEmergency }) {
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
-  const taskDescriptions = [
-    'Fix Efficiency Math (0.0 → 0.5)',
-    'Fix Altitude Update (Shadowing)',
-    'Prevent Loop Overshoot (< not !=)'
-  ];
+  const getStageTitle = (stage) => {
+    const titles = {
+      1: '🔧 Engine Room',
+      2: '🛰️ Navigation',
+      3: '💨 Oxygen System'
+    };
+    return titles[stage] || 'Unknown';
+  };
 
   return (
     <div className="min-h-screen relative">
@@ -269,24 +266,81 @@ export default function CodeEditor({ onEmergency }) {
       <div className="relative z-10 p-4">
         <div className="flex justify-between items-center mb-4">
           <div className="flex gap-4 items-center">
-            <div className="panel-space-sm px-4 py-2">
-              <span className="font-pixel text-sm text-gray-900">
-                {t('game.mode')}: {state.mode}
-              </span>
+            {/* Stage Indicator */}
+            <div className="panel-space-sm px-6 py-3">
+              <div className="flex items-center gap-3">
+                <span className="font-pixel text-xl text-gray-900">
+                  STAGE {currentStage}/3
+                </span>
+                <div className="flex gap-1">
+                  {[1, 2, 3].map(stage => (
+                    <div
+                      key={stage}
+                      className={`w-3 h-3 rounded-full border-2 border-brown-dark ${
+                        tasksComplete[stage] 
+                          ? 'bg-green-500' 
+                          : stage === currentStage 
+                            ? 'bg-orange animate-pulse' 
+                            : 'bg-gray-400'
+                      }`}
+                    />
+                  ))}
+                </div>
+              </div>
             </div>
 
+            {/* Timer */}
             <motion.div
-              className={`panel-space-sm px-4 py-2 flex items-center gap-2 ${
-                timeLeft < 60 ? 'bg-red-500' : 'bg-orange'
-              }`}
-              animate={timeLeft < 60 ? { scale: [1, 1.05, 1] } : {}}
-              transition={{ duration: 0.5, repeat: timeLeft < 60 ? Infinity : 0 }}
-            >
-              <Clock className="w-5 h-5" />
-              <span className="font-pixel text-sm text-white">
-                {formatTime(timeLeft)}
-              </span>
-            </motion.div>
+  className="panel-space-sm px-6 py-3 flex items-center gap-3"
+  style={{
+    backgroundColor: timerSeconds < 20 
+      ? '#dc2626'  // Bright red for urgency
+      : timerSeconds < 40 
+        ? '#ea580c'  // Bright orange for warning
+        : '#16a34a', // Bright green for safe
+    borderColor: '#3E2723',
+    borderWidth: '4px',
+    boxShadow: timerSeconds < 20 
+      ? '0 0 20px rgba(220, 38, 38, 0.6), 0 4px 0 rgba(0,0,0,0.8)'
+      : '0 4px 0 rgba(0,0,0,0.8)',
+  }}
+  animate={timerSeconds < 20 ? { 
+    scale: [1, 1.05, 1],
+    boxShadow: [
+      '0 0 20px rgba(220, 38, 38, 0.6), 0 4px 0 rgba(0,0,0,0.8)',
+      '0 0 30px rgba(220, 38, 38, 0.9), 0 4px 0 rgba(0,0,0,0.8)',
+      '0 0 20px rgba(220, 38, 38, 0.6), 0 4px 0 rgba(0,0,0,0.8)',
+    ]
+  } : {}}
+  transition={{ duration: 0.5, repeat: timerSeconds < 20 ? Infinity : 0 }}
+>
+  <Clock className="w-6 h-6 text-white drop-shadow-lg" />
+  <span 
+    className="font-pixel text-2xl font-bold"
+    style={{ 
+      color: '#FFFFFF',
+      textShadow: '3px 3px 6px rgba(0,0,0,0.9), 0 0 10px rgba(0,0,0,0.5)',
+      letterSpacing: '0.05em'
+    }}
+  >
+    {formatTime(timerSeconds)}
+  </span>
+  {timerSeconds < 20 && (
+    <motion.div
+      animate={{ 
+        rotate: [0, 10, -10, 10, 0],
+        scale: [1, 1.2, 1]
+      }}
+      transition={{ 
+        duration: 0.5, 
+        repeat: Infinity,
+        repeatDelay: 0.2
+      }}
+    >
+      <AlertTriangle className="w-6 h-6 text-yellow-300 drop-shadow-lg" />
+    </motion.div>
+  )}
+</motion.div>
             
             {state.isEliminated && (
               <motion.div
@@ -295,7 +349,7 @@ export default function CodeEditor({ onEmergency }) {
                 className="panel-space-sm px-4 py-2 bg-red-500"
               >
                 <span className="font-pixel text-sm text-white">
-                  {t('game.spectator')}
+                  SPECTATOR
                 </span>
               </motion.div>
             )}
@@ -308,7 +362,7 @@ export default function CodeEditor({ onEmergency }) {
             whileHover={{ scale: state.isEliminated ? 1 : 1.05 }}
             whileTap={{ scale: state.isEliminated ? 1 : 0.95 }}
           >
-            {t('game.emergency')}
+            EMERGENCY MEETING
           </motion.button>
         </div>
 
@@ -337,18 +391,6 @@ export default function CodeEditor({ onEmergency }) {
                     Jam Sensors
                   </button>
                 </div>
-                
-                <div className="mt-6">
-                  <h4 className="font-game text-xl mb-2 text-gray-700">Fake Tests</h4>
-                  <div className="space-y-2">
-                    {[1, 2, 3].map((i) => (
-                      <div key={i} className="flex items-center gap-2 p-2 bg-white/50 border-2 border-brown-dark">
-                        <CheckCircle2 className="w-5 h-5 text-green-500" />
-                        <span className="font-game text-lg">Test {i}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
               </motion.div>
             ) : (
               <motion.div
@@ -356,33 +398,14 @@ export default function CodeEditor({ onEmergency }) {
                 initial={{ x: -50, opacity: 0 }}
                 animate={{ x: 0, opacity: 1 }}
               >
-                <h3 className="font-pixel text-lg mb-4 text-green-600">🛰️ MISSION TASKS</h3>
-                <div className="space-y-3">
-                  {taskDescriptions.map((task, i) => {
-                    const isPassed = testProgress[`task${i + 1}`];
-                    return (
-                      <motion.div
-                        key={i}
-                        className={`p-3 border-3 ${isPassed ? 'border-green-500 bg-green-50' : 'border-gray-400 bg-white/50'}`}
-                        animate={isPassed ? { scale: [1, 1.05, 1] } : {}}
-                      >
-                        <div className="flex items-center gap-2">
-                          {isPassed ? (
-                            <CheckCircle2 className="w-5 h-5 text-green-600" />
-                          ) : (
-                            <XCircle className="w-5 h-5 text-gray-400" />
-                          )}
-                          <span className="font-game text-sm text-gray-900">{task}</span>
-                        </div>
-                      </motion.div>
-                    );
-                  })}
-                </div>
+                <h3 className="font-pixel text-sm mb-4 text-green-600">
+                  {getStageTitle(currentStage)}
+                </h3>
                 
                 <button
                   onClick={handleRunTests}
                   disabled={isTerminalBusy || state.isEliminated}
-                  className={`btn-space green w-full mt-4 text-sm flex items-center justify-center gap-2 ${
+                  className={`btn-space green w-full text-sm flex items-center justify-center gap-2 ${
                     isTerminalBusy || state.isEliminated ? 'opacity-50 cursor-not-allowed' : ''
                   }`}
                 >
@@ -400,9 +423,9 @@ export default function CodeEditor({ onEmergency }) {
                 </button>
 
                 {/* Terminal Output */}
-                <div className="mt-4 bg-black border-4 border-brown-dark p-3 h-48 overflow-y-auto font-mono text-xs">
+                <div className="mt-4 bg-black border-4 border-brown-dark p-3 h-64 overflow-y-auto font-mono text-xs">
                   {terminalLogs.length === 0 ? (
-                    <div className="text-green-400">$ Ready for test execution...</div>
+                    <div className="text-green-400">$ Stage {currentStage} ready...</div>
                   ) : (
                     terminalLogs.map((log, i) => (
                       <div key={i} className="text-green-400 mb-1">
@@ -415,15 +438,16 @@ export default function CodeEditor({ onEmergency }) {
               </motion.div>
             )}
 
+            {/* Players List */}
             <div className="panel-space flex-shrink-0">
-              <h3 className="font-pixel text-sm mb-3 text-gray-900">{t('game.players')}</h3>
+              <h3 className="font-pixel text-sm mb-3 text-gray-900">PLAYERS</h3>
               
               <div className="space-y-2">
-                <p className="font-game text-lg text-green-600">{t('game.alive')}</p>
+                <p className="font-game text-lg text-green-600">ALIVE</p>
                 {alivePlayers.map((player, index) => (
                   <div key={player.id} className="flex items-center gap-2">
                     <Ship type={getShipType(playerList.indexOf(player))} size="sm" />
-                    <span className="font-game text-lg text-gray-900">
+                    <span className="font-game text-sm text-gray-900">
                       {player.username}
                       {player.id === state.playerId && ' (You)'}
                     </span>
@@ -433,11 +457,11 @@ export default function CodeEditor({ onEmergency }) {
 
               {eliminatedPlayers.length > 0 && (
                 <div className="space-y-2 mt-4">
-                  <p className="font-game text-lg text-red-600">{t('game.eliminated')}</p>
+                  <p className="font-game text-lg text-red-600">ELIMINATED</p>
                   {eliminatedPlayers.map((player, index) => (
                     <div key={player.id} className="flex items-center gap-2 opacity-50">
                       <Ship type={getShipType(playerList.indexOf(player))} size="sm" />
-                      <span className="font-game text-lg line-through text-gray-600">
+                      <span className="font-game text-sm line-through text-gray-600">
                         {player.username}
                       </span>
                     </div>
@@ -448,19 +472,25 @@ export default function CodeEditor({ onEmergency }) {
           </div>
 
           <div className="col-span-3 flex flex-col gap-4">
+            {/* Task Description */}
             <motion.div
               className="panel-space"
               initial={{ y: -50, opacity: 0 }}
               animate={{ y: 0, opacity: 1 }}
+              key={state.task?.id} // Re-animate when task changes
             >
-              <h3 className="font-pixel text-lg mb-2 text-gray-900">{t('game.task')}</h3>
-              <p className="font-game text-xl text-gray-700">
-                {state.task?.description || 'Loading mission...'}
+              <h3 className="font-pixel text-xl mb-2 text-gray-900">
+                {state.task?.title || 'Loading...'}
+              </h3>
+              <p className="font-game text-lg text-gray-700">
+                {state.task?.description || 'Waiting for task data...'}
               </p>
             </motion.div>
 
+            {/* Code Editor */}
             <div className="flex-1 border-4 border-brown-dark overflow-hidden shadow-pixel">
               <Editor
+                key={state.task?.id} // Force remount when task changes
                 height="100%"
                 defaultLanguage="java"
                 theme="vs-dark"
@@ -468,7 +498,7 @@ export default function CodeEditor({ onEmergency }) {
                 onMount={handleEditorDidMount}
                 options={{
                   minimap: { enabled: false },
-                  fontSize: 16,
+                  fontSize: 14,
                   readOnly: state.isEliminated,
                   fontFamily: 'Consolas, monospace',
                   automaticLayout: true,
@@ -476,20 +506,21 @@ export default function CodeEditor({ onEmergency }) {
               />
             </div>
 
-            <div className="panel-space h-64 flex flex-col">
-              <h3 className="font-pixel text-sm mb-3 text-gray-900">{t('game.chat')}</h3>
+            {/* Chat */}
+            <div className="panel-space h-48 flex flex-col">
+              <h3 className="font-pixel text-sm mb-3 text-gray-900">CHAT</h3>
               
               <div className="flex-1 overflow-y-auto mb-3 space-y-2 min-h-0">
                 {state.messages.map((msg, index) => (
                   <div key={index} className="chat-message-space">
                     {msg.system ? (
-                      <span className="font-game text-lg italic text-gray-600">{msg.text}</span>
+                      <span className="font-game text-sm italic text-gray-600">{msg.text}</span>
                     ) : (
                       <>
-                        <span className="font-game text-lg font-bold text-orange">
+                        <span className="font-game text-sm font-bold text-orange">
                           {msg.username}:
                         </span>
-                        <span className="font-game text-lg ml-2 text-gray-900">{msg.text}</span>
+                        <span className="font-game text-sm ml-2 text-gray-900">{msg.text}</span>
                       </>
                     )}
                   </div>
@@ -505,13 +536,13 @@ export default function CodeEditor({ onEmergency }) {
                     onChange={(e) => setChatMessage(e.target.value)}
                     onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
                     placeholder="Type..."
-                    className="input-space flex-1 text-lg py-2"
+                    className="input-space flex-1 text-sm py-1"
                   />
                   <button
                     onClick={handleSendMessage}
                     className="btn-space green text-xs px-4"
                   >
-                    {t('common.send')}
+                    SEND
                   </button>
                 </div>
               )}

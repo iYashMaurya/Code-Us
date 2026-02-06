@@ -4,56 +4,57 @@ import { motion } from 'framer-motion';
 import Starfield from './Starfield';
 import Ship, { getShipType } from './Ship';
 
-export default function EndGame({ reason, IMPOSTERId }) {
+// FIX #4: Changed IMPOSTERId to impostorId for consistency
+export default function EndGame({ reason, impostorId }) {
   const { state } = useGame();
   
   const getWinMessage = (reason) => {
-  switch (reason) {
-    case 'CIVILIAN_WIN_TESTS':
-      return {
-        title: '🛰️ MISSION SUCCESS',
-        subtitle: 'All satellite bugs have been fixed!',
-        message: 'The crewmates saved the mission by completing all tasks!',
-        color: 'green'
-      };
-    
-    case 'CIVILIAN_WIN':
-      return {
-        title: '🎉 CREWMATES WIN',
-        subtitle: 'IMPOSTER has been eliminated!',
-        message: 'The crew successfully identified and voted out the IMPOSTER!',
-        color: 'green'
-      };
-    
-    case 'IMPOSTER_WIN':
-      return {
-        title: '💀 IMPOSTER WINS',
-        subtitle: 'All crewmates eliminated!',
-        message: 'The IMPOSTER has sabotaged the mission!',
-        color: 'red'
-      };
-    
-    case 'IMPOSTER_WIN_TIME':
-      return {
-        title: '⏰ TIME\'S UP',
-        subtitle: 'IMPOSTER wins!',
-        message: 'The crew ran out of time to fix the satellite!',
-        color: 'red'
-      };
-    
-    default:
-      return {
-        title: 'GAME OVER',
-        subtitle: '',
-        message: 'The game has ended.',
-        color: 'gray'
-      };
-  }
-};
+    switch (reason) {
+      case 'CIVILIAN_WIN_TASKS':
+        return {
+          title: '🛰️ MISSION SUCCESS',
+          subtitle: 'All satellite bugs have been fixed!',
+          message: 'The crewmates saved the mission by completing all tasks!',
+          color: 'green'
+        };
+      
+      case 'CIVILIAN_WIN_VOTE':
+        return {
+          title: '🎉 CREWMATES WIN',
+          subtitle: 'IMPOSTOR has been eliminated!',
+          message: 'The crew successfully identified and voted out the IMPOSTOR!',
+          color: 'green'
+        };
+      
+      case 'IMPOSTOR_WIN':
+        return {
+          title: '💀 IMPOSTOR WINS',
+          subtitle: 'All crewmates eliminated!',
+          message: 'The IMPOSTOR has sabotaged the mission!',
+          color: 'red'
+        };
+      
+      case 'IMPOSTOR_WIN_TIMEOUT':
+        return {
+          title: '⏰ TIME\'S UP',
+          subtitle: 'IMPOSTOR wins!',
+          message: 'The crew ran out of time to fix the satellite!',
+          color: 'red'
+        };
+      
+      default:
+        return {
+          title: 'GAME OVER',
+          subtitle: '',
+          message: 'The game has ended.',
+          color: 'gray'
+        };
+    }
+  };
 
   const winInfo = getWinMessage(reason);
   const playerList = Object.values(state.players || {});
-  const IMPOSTER = playerList.find(p => p.id === IMPOSTERId);
+  const impostor = playerList.find(p => p.id === impostorId); // Use lowercase
 
   const getColorClasses = (color) => {
     const classes = {
@@ -113,14 +114,14 @@ export default function EndGame({ reason, IMPOSTERId }) {
             {winInfo.message}
           </p>
 
-          {/* Reveal IMPOSTER */}
-          {IMPOSTER && (
+          {/* Reveal IMPOSTOR */}
+          {impostor && (
             <div className="mt-6 p-4 bg-red-100 border-3 border-red-500">
-              <p className="font-pixel text-sm mb-2 text-red-600">THE IMPOSTER WAS:</p>
+              <p className="font-pixel text-sm mb-2 text-red-600">THE IMPOSTOR WAS:</p>
               <div className="flex items-center justify-center gap-3">
-                <Ship type={getShipType(playerList.indexOf(IMPOSTER))} size="lg" />
+                <Ship type={getShipType(playerList.indexOf(impostor))} size="lg" />
                 <span className="font-game text-3xl text-gray-900">
-                  {IMPOSTER.username}
+                  {impostor.username}
                 </span>
               </div>
             </div>
@@ -149,7 +150,7 @@ export default function EndGame({ reason, IMPOSTERId }) {
                     {player.username}
                   </p>
                   <p className={`font-pixel text-xs ${
-                    player.role === 'IMPOSTER' ? 'text-red-600' : 'text-green-600'
+                    player.role === 'IMPOSTOR' ? 'text-red-600' : 'text-green-600'
                   }`}>
                     {player.role}
                   </p>

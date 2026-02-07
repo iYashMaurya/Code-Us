@@ -1,0 +1,17 @@
+{
+  "context": "Code Mafia is a social deduction game for developers. The tone is competitive, slightly dark, and tech-savvy.",
+  "glossary": [
+    {
+      "term": "Sabotage",
+      "definition": "A game mechanic where the Mafia breaks the code. Do not translate as a generic crime; keep it tech-focused."
+    },
+    {
+      "term": "Mafia",
+      "definition": "The hidden antagonists in the game. In some languages, you might want to keep the English term if it's common in gaming."
+    },
+    {
+      "term": "Merge Conflict",
+      "definition": "A task that the 'Villagers' (Developers) must solve. Keep it sounding like a Git error."
+    }
+  ]
+}

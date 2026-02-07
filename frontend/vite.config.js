@@ -7,8 +7,9 @@ export default defineConfig({
     lingoCompilerPlugin({
       sourceRoot: "src",
       sourceLocale: "en",
-      targetLocales: ["hi", "es"], 
-      useDirective: true, 
+      targetLocales: ["hi", "de", "fr"], 
+      useDirective: true,
+      cacheDir: "src/lingo/cache", 
     }),
     react()
   ],

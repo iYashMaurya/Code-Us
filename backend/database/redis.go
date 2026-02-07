@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"time"
 
@@ -16,7 +17,6 @@ var (
 	ctx = context.Background()
 	RDB *redis.Client
 )
-
 
 func InitRedis(addr, password string, db int) error {
 	options := &redis.Options{
@@ -29,11 +29,17 @@ func InitRedis(addr, password string, db int) error {
 		PoolSize:     10,
 	}
 
-	if !strings.Contains(addr, "localhost") && !strings.Contains(addr, "127.0.0.1") {
+	isDev := os.Getenv("ENVIRONMENT") == "development"
+	isDockerInternal := strings.Contains(addr, "redis")
+	isLocalhost := strings.Contains(addr, "localhost") || strings.Contains(addr, "127.0.0.1")
+
+	if !isDev && !isDockerInternal && !isLocalhost {
 		options.TLSConfig = &tls.Config{
 			MinVersion: tls.VersionTLS12,
 		}
 		log.Println("TLS enabled for remote Redis connection")
+	} else {
+		log.Println("TLS disabled (Local/Dev environment detected)")
 	}
 
 	RDB = redis.NewClient(options)
@@ -45,7 +51,6 @@ func InitRedis(addr, password string, db int) error {
 	log.Println("Redis connected successfully")
 	return nil
 }
-
 
 func RoomStateKey(roomID string) string {
 	return fmt.Sprintf("room:%s:state", roomID)
@@ -63,13 +68,11 @@ func RoomTimerKey(roomID string) string {
 	return fmt.Sprintf("room:%s:timer_start", roomID)
 }
 
-
 func SaveGameState(roomID string, state interface{}) error {
 	jsonData, err := json.Marshal(state)
 	if err != nil {
 		return fmt.Errorf("failed to marshal game state: %w", err)
 	}
-
 
 	err = RDB.Set(ctx, RoomStateKey(roomID), jsonData, time.Hour).Err()
 	if err != nil {
@@ -78,7 +81,6 @@ func SaveGameState(roomID string, state interface{}) error {
 
 	return nil
 }
-
 
 func LoadGameState(roomID string, target interface{}) error {
 	jsonData, err := RDB.Get(ctx, RoomStateKey(roomID)).Result()
@@ -96,13 +98,11 @@ func LoadGameState(roomID string, target interface{}) error {
 	return nil
 }
 
-
 func SavePlayer(roomID string, player interface{}) error {
 	jsonData, err := json.Marshal(player)
 	if err != nil {
 		return fmt.Errorf("failed to marshal player: %w", err)
 	}
-
 
 	playerMap := make(map[string]interface{})
 	json.Unmarshal(jsonData, &playerMap)
@@ -113,12 +113,10 @@ func SavePlayer(roomID string, player interface{}) error {
 		return fmt.Errorf("failed to save player: %w", err)
 	}
 
-
 	RDB.Expire(ctx, RoomPlayersKey(roomID), time.Hour)
 
 	return nil
 }
-
 
 func LoadPlayer(roomID, playerID string, target interface{}) error {
 	jsonData, err := RDB.HGet(ctx, RoomPlayersKey(roomID), playerID).Result()
@@ -136,21 +134,17 @@ func LoadPlayer(roomID, playerID string, target interface{}) error {
 	return nil
 }
 
-
 func LoadAllPlayers(roomID string) (map[string]string, error) {
 	return RDB.HGetAll(ctx, RoomPlayersKey(roomID)).Result()
 }
-
 
 func DeletePlayer(roomID, playerID string) error {
 	return RDB.HDel(ctx, RoomPlayersKey(roomID), playerID).Err()
 }
 
-
 func SaveTimerStart(roomID string, startTime time.Time) error {
 	return RDB.Set(ctx, RoomTimerKey(roomID), startTime.Unix(), time.Hour).Err()
 }
-
 
 func LoadTimerStart(roomID string) (time.Time, error) {
 	unixTime, err := RDB.Get(ctx, RoomTimerKey(roomID)).Int64()
@@ -160,12 +154,10 @@ func LoadTimerStart(roomID string) (time.Time, error) {
 	return time.Unix(unixTime, 0), nil
 }
 
-
 func RoomExists(roomID string) bool {
 	exists, err := RDB.Exists(ctx, RoomStateKey(roomID)).Result()
 	return err == nil && exists > 0
 }
-
 
 func DeleteRoom(roomID string) error {
 	keys := []string{
@@ -177,13 +169,11 @@ func DeleteRoom(roomID string) error {
 	return RDB.Del(ctx, keys...).Err()
 }
 
-
 func GetActiveRooms() ([]string, error) {
 	keys, err := RDB.Keys(ctx, "room:*:state").Result()
 	if err != nil {
 		return nil, err
 	}
-
 
 	rooms := make([]string, 0, len(keys))
 	for _, key := range keys {

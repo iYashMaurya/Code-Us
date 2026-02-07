@@ -93,6 +93,12 @@ Sleep            █░░░░░░░░░ (Who needs it?)
 ```
 
 ---
+## 🏗️ ARCHITECTURE
+
+Want to see how everything connects? Check out our high-level architecture diagram:
+
+<img width="5335" height="2076" alt="High-level-architecture" src="https://github.com/user-attachments/assets/f3e4946c-860e-4d70-9f9e-791e6095eda3" />
+
 
 ## 📂 PROJECT STRUCTURE
 
@@ -116,7 +122,14 @@ Sleep            █░░░░░░░░░ (Who needs it?)
 You want to run this locally?  
 **Good luck, Detective.**
 
-### 1️⃣ Prerequisites
+### 1️⃣ Clone the Repository
+
+```bash
+git clone https://github.com/iYashMaurya/Code-Us.git
+cd Code-Us
+```
+
+### 2️⃣ Prerequisites
 
 **Docker & Docker Compose (Recommended)**  
 OR
@@ -126,7 +139,7 @@ OR
 - Redis (Local or Cloud)
 - Supabase Account
 
-### 2️⃣ Environment Configuration
+### 3️⃣ Environment Configuration
 
 Create a `.env` file in the root directory (mandatory).
 
@@ -153,7 +166,7 @@ SUPABASE_KEY=your_supabase_anon_key
 LINGODOTDEV_API_KEY=lng_your_key_here
 ```
 
-### 3️⃣ Option A: "I want it now" (Docker)
+### 4️⃣ Option A: "I want it now" (Docker)
 
 Spins up Backend, Frontend, and Redis automatically.
 
@@ -164,7 +177,7 @@ docker-compose up --build
 - **Frontend** → http://localhost:5173
 - **Backend** → http://localhost:8080
 
-### 4️⃣ Option B: "I like to control everything" (Manual)
+### 5️⃣ Option B: "I like to control everything" (Manual)
 
 **Terminal 1 — Backend**
 

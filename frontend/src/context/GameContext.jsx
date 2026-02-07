@@ -138,7 +138,7 @@ function gameReducer(state, action) {
         isTransitioning: true,
         transitionFrom: action.payload.fromStage,
         transitionTo: action.payload.toStage,
-        terminalLogs: [],  // ✅ FIX #10: Clear logs on transition
+        terminalLogs: [],
       };
     
     case 'TRANSITION_COMPLETE':
@@ -149,7 +149,6 @@ function gameReducer(state, action) {
         transitionTo: null,
       };
     
-    // ✅ FIX #10: Limit terminal logs
     case 'TEST_LOCKED':
       return {
         ...state,
@@ -157,7 +156,7 @@ function gameReducer(state, action) {
         currentRunner: action.payload.runner,
         currentRunnerID: action.payload.runnerID,
         terminalLogs: [
-          ...state.terminalLogs.slice(-50),  // ✅ Keep last 50 only
+          ...state.terminalLogs.slice(-50),
           `🔒 ${action.payload.runner} is running Stage ${action.payload.stage} diagnostics...`,
         ],
       };
@@ -172,7 +171,7 @@ function gameReducer(state, action) {
         currentRunner: null,
         currentRunnerID: null,
         terminalLogs: [
-          ...state.terminalLogs.slice(-50),  // ✅ Keep last 50 only
+          ...state.terminalLogs.slice(-50),
           `${passed ? '✅' : '❌'} Stage ${stage} test ${passed ? 'PASSED' : 'FAILED'}`,
           passed ? `🚀 Advancing to Stage ${stage + 1}...` : '🔄 Try again!',
         ],
@@ -185,7 +184,7 @@ function gameReducer(state, action) {
         currentRunner: null,
         currentRunnerID: null,
         terminalLogs: [
-          ...state.terminalLogs.slice(-50),  // ✅ Keep last 50 only
+          ...state.terminalLogs.slice(-50),
           `⚠️ Test cancelled: ${action.payload.reason}`,
         ],
       };
@@ -194,7 +193,7 @@ function gameReducer(state, action) {
       return {
         ...state,
         terminalLogs: [
-          ...state.terminalLogs.slice(-50),  // ✅ Keep last 50 only
+          ...state.terminalLogs.slice(-50),
           `❌ ${action.payload.message}`,
           `⏳ Another player is currently running tests...`,
         ],
@@ -203,18 +202,32 @@ function gameReducer(state, action) {
     case 'CLEAR_TERMINAL':
       return { ...state, terminalLogs: [] };
     
-    // ✅ FIX #16: Limit chat messages too
+    // 🔥 FIXED: Handle chat messages properly with deduplication
     case 'ADD_MESSAGE':
+      const newMessage = action.payload;
+      
+      // Check if message already exists (prevent duplicates)
+      const messageExists = state.messages.some(
+        m => m.messageId === newMessage.messageId
+      );
+      
+      if (messageExists) {
+        console.log('⚠️ Duplicate message detected, skipping:', newMessage.messageId);
+        return state;
+      }
+      
+      console.log('✅ Adding new message:', newMessage.messageId);
       return {
         ...state,
-        messages: [...state.messages.slice(-100), action.payload],  // Keep last 100
+        messages: [...state.messages.slice(-100), newMessage],
       };
     
     case 'CLEAR_MESSAGES':
       return { ...state, messages: [] };
     
-    // 🔥 NEW: Handle translation updates
+    // 🔥 Handle translation updates (when translations arrive later)
     case 'UPDATE_MESSAGE_TRANSLATION':
+      console.log('🌐 Updating translation for:', action.payload.messageId);
       return {
         ...state,
         messages: state.messages.map(m => 
@@ -222,7 +235,7 @@ function gameReducer(state, action) {
             ? { 
                 ...m, 
                 translations: { ...m.translations, ...action.payload.translations }, 
-                translationId: Date.now() // Force re-render with new key
+                translationId: Date.now() // Force re-render
               } 
             : m
         )

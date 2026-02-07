@@ -13,13 +13,11 @@ import (
 	"code-mafia-backend/database"
 
 	"github.com/gorilla/mux"
-
 )
 
 func main() {
 
 	config.Load()
-
 
 	err := database.InitRedis(
 		config.AppConfig.RedisURL,
@@ -30,12 +28,10 @@ func main() {
 		log.Fatalf("Failed to connect to Redis: %v", err)
 	}
 
-
 	database.InitSupabase(
 		config.AppConfig.SupabaseURL,
 		config.AppConfig.SupabaseKey,
 	)
-
 
 	hub := newHub()
 	go hub.run()
@@ -44,28 +40,26 @@ func main() {
 
 	r := mux.NewRouter()
 
-
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
 			if origin == "" {
 				origin = "*"
 			}
-			
+
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Upgrade, Connection, Sec-WebSocket-Key, Sec-WebSocket-Version, Sec-WebSocket-Extensions")
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
-			
+
 			if r.Method == "OPTIONS" {
 				w.WriteHeader(http.StatusOK)
 				return
 			}
-			
+
 			next.ServeHTTP(w, r)
 		})
 	})
-
 
 	r.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Game WebSocket connection attempt from %s", r.RemoteAddr)
@@ -73,17 +67,15 @@ func main() {
 	})
 
 	r.PathPrefix("/yjs").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        log.Printf("Yjs WebSocket connection attempt from %s for room: %s", 
-            r.RemoteAddr, r.URL.Query().Get("room"))
-        serveYjs(hub, w, r)
-    }).Methods("GET")
-
+		log.Printf("Yjs WebSocket connection attempt from %s for room: %s",
+			r.RemoteAddr, r.URL.Query().Get("room"))
+		serveYjs(hub, w, r)
+	}).Methods("GET")
 
 	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
-
 
 	r.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		rooms, _ := database.GetActiveRooms()
@@ -102,7 +94,6 @@ func main() {
 	log.Printf("  Translation:  Enabled (sidecar mode)")
 	log.Println("═══════════════════════════════════════════════")
 
-
 	go func() {
 		sigint := make(chan os.Signal, 1)
 		signal.Notify(sigint, os.Interrupt, syscall.SIGTERM)
@@ -117,13 +108,12 @@ func main() {
 }
 
 func (h *Hub) listenForTranslations() {
-	// ctx := database.RDB.Context()
 	ctx := context.Background()
-	
+
 	pubsub := database.RDB.Subscribe(ctx, "chat:translations")
 	defer pubsub.Close()
 
-	log.Println(" Translation listener started - waiting for translations...")
+	log.Println("🎧 Translation listener started - waiting for translations...")
 
 	_, err := pubsub.Receive(ctx)
 	if err != nil {
@@ -131,9 +121,8 @@ func (h *Hub) listenForTranslations() {
 		return
 	}
 
-
 	ch := pubsub.Channel()
-	
+
 	for msg := range ch {
 		var translation struct {
 			MessageID    string            `json:"messageId"`
@@ -153,38 +142,41 @@ func (h *Hub) listenForTranslations() {
 		}
 
 		if translation.Error != "" {
-			log.Printf("Translation error for message %s: %s", translation.MessageID, translation.Error)
-		} else {
-			log.Printf("Received translations for message %s", translation.MessageID)
-		}
+			log.Printf("⚠️ Translation error for message %s: %s", translation.MessageID, translation.Error)
 
+		} else {
+			log.Printf("✅ Received translations for message %s", translation.MessageID)
+		}
 
 		h.mu.RLock()
 		room := h.rooms[translation.RoomID]
 		h.mu.RUnlock()
 
 		if room == nil {
-			log.Printf("Room %s not found for translation update", translation.RoomID)
+			log.Printf("❌ Room %s not found for translation update", translation.RoomID)
 			continue
 		}
 
-
-		updateMsg := Message{
-			Type: "TRANSLATION_UPDATE",
+		chatMsg := Message{
+			Type: "CHAT",
 			Data: map[string]interface{}{
 				"messageId":    translation.MessageID,
-				"translations": translation.Translations,
 				"username":     translation.Username,
+				"text":         translation.Text,
+				"playerId":     translation.PlayerID,
+				"translations": translation.Translations,
+				"timestamp":    translation.Timestamp,
+				"system":       false,
 			},
 		}
 
-		msgData, err := json.Marshal(updateMsg)
+		msgData, err := json.Marshal(chatMsg)
 		if err != nil {
-			log.Printf("Failed to marshal translation update: %v", err)
+			log.Printf("Failed to marshal chat message: %v", err)
 			continue
 		}
 
 		room.broadcast <- msgData
-		log.Printf("Broadcasted translation update for message %s to room %s", translation.MessageID, translation.RoomID)
+		log.Printf("📤 Broadcasted chat message %s to room %s", translation.MessageID, translation.RoomID)
 	}
 }

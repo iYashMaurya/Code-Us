@@ -6,7 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "lingo:setup": "lingo init",
+  "lingo:extract": "lingo extract",
+  "lingo:translate": "lingo translate --auto",
+  "lingo:sync": "lingo extract && lingo translate --auto"
   },
   "dependencies": {
     "@lingo.dev/compiler": "^0.3.6",
@@ -26,12 +30,9 @@
     "@types/react-dom": "^18.2.17",
     "@vitejs/plugin-react": "^4.2.1",
     "autoprefixer": "^10.4.16",
+    "lingo.dev": "^0.131.1",
     "postcss": "^8.4.32",
     "tailwindcss": "^3.3.6",
     "vite": "^5.0.8"
-  },
-  "scripts": {
-  "lingo:sync": "lingo extract && lingo translate --auto",
-  "lingo:check": "lingo validate"
-}
+  }
 }

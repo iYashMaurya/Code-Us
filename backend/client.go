@@ -269,7 +269,27 @@ func (c *Client) handleMessage(message []byte) {
 		room.mu.RUnlock()
 
 		if player != nil && !player.IsEliminated {
+			// Extract text from message data
+			data, ok := msg.Data.(map[string]interface{})
+			if !ok {
+				return
+			}
+			
+			text, ok := data["text"].(string)
+			if !ok || text == "" {
+				return
+			}
+
+			// Broadcast to room immediately
 			room.broadcast <- message
+
+			// 🔥 TRIGGER TRANSLATION PIPELINE
+			go c.hub.handleChatMessage(
+				c.RoomID,
+				c.PlayerID,
+				c.Username,
+				text,
+			)
 		}
 
 	case "EMERGENCY":

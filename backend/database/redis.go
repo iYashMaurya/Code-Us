@@ -164,6 +164,7 @@ func DeleteRoom(roomID string) error {
 		RoomStateKey(roomID),
 		RoomPlayersKey(roomID),
 		RoomTimerKey(roomID),
+		fmt.Sprintf("room:%s:chat_history", roomID),
 	}
 
 	return RDB.Del(ctx, keys...).Err()
@@ -200,4 +201,61 @@ func splitKey(key string) []string {
 	}
 	result = append(result, current)
 	return result
+}
+
+func PublishChatMessage(messageID, text, username, roomID, playerID string, context []string) error {
+	payload := map[string]interface{}{
+		"messageId": messageID,
+		"text":      text,
+		"username":  username,
+		"roomId":    roomID,
+		"playerId":  playerID,
+		"context":   context,
+		"timestamp": time.Now().Unix(),
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal chat message: %w", err)
+	}
+
+	err = RDB.Publish(ctx, "chat:processing", jsonData).Err()
+	if err != nil {
+		return fmt.Errorf("failed to publish chat message: %w", err)
+	}
+
+	log.Printf("📤 Published message to translation: %s", messageID)
+	return nil
+}
+
+func GetRoomChatHistory(roomID string, limit int) ([]string, error) {
+	key := fmt.Sprintf("room:%s:chat_history", roomID)
+	
+	messages, err := RDB.LRange(ctx, key, 0, int64(limit-1)).Result()
+	if err != nil && err != redis.Nil {
+		return nil, fmt.Errorf("failed to get chat history: %w", err)
+	}
+	
+	return messages, nil
+}
+
+func AddToChatHistory(roomID, message string) error {
+	key := fmt.Sprintf("room:%s:chat_history", roomID)
+	
+	// Add to list
+	err := RDB.LPush(ctx, key, message).Err()
+	if err != nil {
+		return fmt.Errorf("failed to add to chat history: %w", err)
+	}
+	
+	// Trim to last 10 messages
+	err = RDB.LTrim(ctx, key, 0, 9).Err()
+	if err != nil {
+		return fmt.Errorf("failed to trim chat history: %w", err)
+	}
+	
+	// Set expiration
+	RDB.Expire(ctx, key, time.Hour)
+	
+	return nil
 }

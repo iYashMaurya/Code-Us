@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
@@ -11,6 +13,7 @@ import (
 	"code-mafia-backend/database"
 
 	"github.com/gorilla/mux"
+
 )
 
 func main() {
@@ -37,6 +40,7 @@ func main() {
 	hub := newHub()
 	go hub.run()
 
+	go hub.listenForTranslations()
 
 	r := mux.NewRouter()
 
@@ -95,6 +99,7 @@ func main() {
 	log.Printf("  Game WebSocket: ws://localhost:%s/ws", port)
 	log.Printf("  Yjs WebSocket:  ws://localhost:%s/yjs", port)
 	log.Printf("  Health Check:   http://localhost:%s/health", port)
+	log.Printf("  Translation:  Enabled (sidecar mode)")
 	log.Println("═══════════════════════════════════════════════")
 
 
@@ -109,4 +114,77 @@ func main() {
 	}()
 
 	log.Fatal(http.ListenAndServe(":"+port, r))
+}
+
+func (h *Hub) listenForTranslations() {
+	// ctx := database.RDB.Context()
+	ctx := context.Background()
+	
+	pubsub := database.RDB.Subscribe(ctx, "chat:translations")
+	defer pubsub.Close()
+
+	log.Println(" Translation listener started - waiting for translations...")
+
+	_, err := pubsub.Receive(ctx)
+	if err != nil {
+		log.Printf("Failed to subscribe to translations: %v", err)
+		return
+	}
+
+
+	ch := pubsub.Channel()
+	
+	for msg := range ch {
+		var translation struct {
+			MessageID    string            `json:"messageId"`
+			Username     string            `json:"username"`
+			Text         string            `json:"text"`
+			Translations map[string]string `json:"translations"`
+			RoomID       string            `json:"roomId"`
+			PlayerID     string            `json:"playerId"`
+			Timestamp    int64             `json:"timestamp"`
+			Error        string            `json:"error,omitempty"`
+		}
+
+		err := json.Unmarshal([]byte(msg.Payload), &translation)
+		if err != nil {
+			log.Printf("Failed to parse translation: %v", err)
+			continue
+		}
+
+		if translation.Error != "" {
+			log.Printf("Translation error for message %s: %s", translation.MessageID, translation.Error)
+		} else {
+			log.Printf("Received translations for message %s", translation.MessageID)
+		}
+
+
+		h.mu.RLock()
+		room := h.rooms[translation.RoomID]
+		h.mu.RUnlock()
+
+		if room == nil {
+			log.Printf("Room %s not found for translation update", translation.RoomID)
+			continue
+		}
+
+
+		updateMsg := Message{
+			Type: "TRANSLATION_UPDATE",
+			Data: map[string]interface{}{
+				"messageId":    translation.MessageID,
+				"translations": translation.Translations,
+				"username":     translation.Username,
+			},
+		}
+
+		msgData, err := json.Marshal(updateMsg)
+		if err != nil {
+			log.Printf("Failed to marshal translation update: %v", err)
+			continue
+		}
+
+		room.broadcast <- msgData
+		log.Printf("Broadcasted translation update for message %s to room %s", translation.MessageID, translation.RoomID)
+	}
 }

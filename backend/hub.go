@@ -1,10 +1,12 @@
 package main
 
 import (
+	"code-mafia-backend/database"
 	"encoding/json"
 	"log"
 	"sync"
 	"time"
+	"github.com/google/uuid"
 )
 
 type Hub struct {
@@ -281,4 +283,47 @@ func (h *Hub) getRoom(roomID string) *Room {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return h.rooms[roomID]
+}
+
+func (h *Hub) handleChatMessage(roomID, playerID, username, text string) {
+	room := h.getRoom(roomID)
+	if room == nil {
+		return
+	}
+
+
+	messageID := uuid.New().String()
+
+
+	chatMsg := Message{
+		Type: "CHAT",
+		Data: map[string]interface{}{
+			"messageId": messageID,
+			"username":  username,
+			"text":      text,
+			"playerId":  playerID,
+			"system":    false,
+		},
+	}
+	msgData, _ := json.Marshal(chatMsg)
+	room.broadcast <- msgData
+
+
+	database.AddToChatHistory(roomID, text)
+
+
+	context, err := database.GetRoomChatHistory(roomID, 3)
+	if err != nil {
+		log.Printf("Failed to get chat history: %v", err)
+		context = []string{}
+	}
+
+	go func() {
+		err := database.PublishChatMessage(messageID, text, username, roomID, playerID, context)
+		if err != nil {
+			log.Printf("Failed to publish chat message for translation: %v", err)
+		}
+	}()
+
+	log.Printf("Chat [%s]: %s: %s", roomID, username, text)
 }

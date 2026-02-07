@@ -19,6 +19,29 @@ services:
       - code-mafia-network
     restart: unless-stopped
 
+  # 🔥 NEW: Translation Sidecar Service
+  translation-service:
+    build:
+      context: ./translation-service
+      dockerfile: Dockerfile
+    container_name: code-mafia-translation
+    environment:
+      - REDIS_URL=${REDIS_URL:-redis:6379}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - LINGODOTDEV_API_KEY=${LINGODOTDEV_API_KEY}
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('ioredis').createClient({host:'redis'}).ping().then(() => process.exit(0)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks:
+      - code-mafia-network
+    restart: unless-stopped
 
   backend:
     build:
@@ -37,6 +60,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      translation-service:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
       interval: 15s
@@ -46,7 +71,6 @@ services:
     networks:
       - code-mafia-network
     restart: unless-stopped
-
 
   frontend:
     build:

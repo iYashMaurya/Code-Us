@@ -13,5 +13,52 @@
       "term": "Merge Conflict",
       "definition": "A task that the 'Villagers' (Developers) must solve. Keep it sounding like a Git error."
     }
-  ]
+  ],
+  "locales": [
+    "en",
+    "hi",
+    "de"
+  ],
+  "sourceLocale": "en",
+  "baseLocale": "en",
+  "catalogs": [
+    {
+      "path": "./src/lingo/cache/{locale}.json",
+      "include": [
+        "src/**/*.{js,jsx,ts,tsx}"
+      ]
+    }
+  ],
+  "translations": {
+    "task1.title": {
+      "en": "ENGINE ROOM - Brake System Failure",
+      "hi": "इंजन रूम - ब्रेक सिस्टम विफलता",
+      "de": "MOTORRAUM - Bremsanlage Ausfall"
+    },
+    "task1.description": {
+      "en": "The racing car's brake system is malfunctioning! Fix the constructor to properly initialize SportBrakes.",
+      "hi": "रेसिंग कार का ब्रेक सिस्टम खराब हो गया है! SportBrakes को ठीक से इनिशियलाइज़ करने के लिए कंस्ट्रक्टर को ठीक करें।",
+      "de": "Das Bremssystem des Rennwagens funktioniert nicht! Reparieren Sie den Konstruktor, um SportBrakes richtig zu initialisieren."
+    },
+    "task2.title": {
+      "en": "🛰️ NAVIGATION - Satellite Orbit Calculation",
+      "hi": "🛰️ नेविगेशन - सैटेलाइट कक्षा गणना",
+      "de": "🛰️ NAVIGATION - Satelliten-Umlaufbahn-Berechnung"
+    },
+    "task2.description": {
+      "en": "The satellite's orbit calculation is broken! Fix the integer division and variable shadowing bugs.",
+      "hi": "सैटेलाइट की कक्षा गणना टूट गई है! पूर्णांक विभाजन और वेरिएबल शैडोइंग बग्स को ठीक करें।",
+      "de": "Die Umlaufbahnberechnung des Satelliten ist defekt! Beheben Sie die Integer-Division und Variable-Shadowing-Fehler."
+    },
+    "task3.title": {
+      "en": "💨 OXYGEN SYSTEM - Life Support Critical",
+      "hi": "💨 ऑक्सीजन सिस्टम - जीवन समर्थन गंभीर",
+      "de": "💨 SAUERSTOFFSYSTEM - Lebenserhaltung kritisch"
+    },
+    "task3.description": {
+      "en": "CRITICAL! Fix both the oxygen flow calculation AND the filtration loop logic before the system fails!",
+      "hi": "गंभीर! सिस्टम विफल होने से पहले ऑक्सीजन प्रवाह गणना और फिल्ट्रेशन लूप लॉजिक दोनों को ठीक करें!",
+      "de": "KRITISCH! Beheben Sie sowohl die Sauerstoffflussberechnung ALS AUCH die Filtrationsschleifenlogik, bevor das System ausfällt!"
+    }
+  }
 }

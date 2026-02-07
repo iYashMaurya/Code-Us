@@ -37,11 +37,13 @@ type Player struct {
 }
 
 type Task struct {
-	ID          string `json:"id"`
-	Stage       int    `json:"stage"`
-	Description string `json:"description"`
-	Template    string `json:"template"`
-	Title       string `json:"title"`
+	ID             string `json:"id"`
+	Stage          int    `json:"stage"`
+	Description    string `json:"description"`
+	Template       string `json:"template"`
+	Title          string `json:"title"`
+	TitleKey       string `json:"titleKey"`
+	DescriptionKey string `json:"descriptionKey"`
 }
 
 type GameState struct {
@@ -78,11 +80,13 @@ type Room struct {
 	timerDone       chan struct{}
 	timerCancelOnce sync.Once
 
-	sabotageActive  bool
-	sabotageType    string
-	sabotageEndTime time.Time
-	corruptedCode   string
-	freezeTimer     *time.Timer
+	sabotageActive      bool
+	sabotageType        string
+	sabotageEndTime     time.Time
+	corruptedCode       string
+	freezeTimer         *time.Timer
+	lastSabotageTime    time.Time
+	sabotageCooldownSec int
 }
 
 func newRoom(id string) *Room {
@@ -99,12 +103,13 @@ func newRoom(id string) *Room {
 			TasksComplete: make(map[int]bool),
 			TimerPaused:   false,
 		},
-		testRunning:    false,
-		votes:          make(map[string]string),
-		votingActive:   false,
-		timerCancel:    make(chan struct{}),
-		timerDone:      make(chan struct{}),
-		sabotageActive: false,
+		testRunning:         false,
+		votes:               make(map[string]string),
+		votingActive:        false,
+		timerCancel:         make(chan struct{}),
+		timerDone:           make(chan struct{}),
+		sabotageActive:      false,
+		sabotageCooldownSec: 10,
 	}
 
 	room.loadFromRedis()
@@ -390,10 +395,12 @@ func (r *Room) resumeTimer() {
 func (r *Room) loadAllTasks() []*Task {
 	return []*Task{
 		{
-			ID:          "task1-sportbrakes",
-			Stage:       1,
-			Title:       "ENGINE ROOM - Brake System Failure",
-			Description: "The racing car's brake system is malfunctioning! Fix the constructor to properly initialize SportBrakes.",
+			ID:             "task1-sportbrakes",
+			Stage:          1,
+			TitleKey:       "task1.title",
+			DescriptionKey: "task1.description",
+			Title:          "ENGINE ROOM - Brake System Failure",
+			Description:    "The racing car's brake system is malfunctioning! Fix the constructor to properly initialize SportBrakes.",
 			Template: `public class RacingCar {
     private String model;
     private Brakes brakes;
@@ -426,10 +433,12 @@ class SportBrakes extends Brakes {
 		},
 
 		{
-			ID:          "task2-satellite",
-			Stage:       2,
-			Title:       "🛰️ NAVIGATION - Satellite Orbit Calculation",
-			Description: "The satellite's orbit calculation is broken! Fix the integer division and variable shadowing bugs.",
+			ID:             "task2-satellite",
+			Stage:          2,
+			TitleKey:       "task2.title",
+			DescriptionKey: "task2.description",
+			Title:          "🛰️ NAVIGATION - Satellite Orbit Calculation",
+			Description:    "The satellite's orbit calculation is broken! Fix the integer division and variable shadowing bugs.",
 			Template: `public class SatelliteSystem {
     static int altitude = 2000;
 
@@ -455,10 +464,12 @@ class SportBrakes extends Brakes {
 		},
 
 		{
-			ID:          "task3-oxygen",
-			Stage:       3,
-			Title:       "💨 OXYGEN SYSTEM - Life Support Critical",
-			Description: "CRITICAL! Fix both the oxygen flow calculation AND the filtration loop logic before the system fails!",
+			ID:             "task3-oxygen",
+			Stage:          3,
+			TitleKey:       "task3.title",
+			DescriptionKey: "task3.description",
+			Title:          "💨 OXYGEN SYSTEM - Life Support Critical",
+			Description:    "CRITICAL! Fix both the oxygen flow calculation AND the filtration loop logic before the system fails!",
 			Template: `public class OxygenSystem {
     private int oxygenLevel = 100;
     private int crew = 5;
@@ -1082,8 +1093,33 @@ func (r *Room) handleSabotage(playerID, sabotageType string) {
 		return
 	}
 
+	timeSinceLastSabotage := time.Since(r.lastSabotageTime).Seconds()
+	if timeSinceLastSabotage < float64(r.sabotageCooldownSec) && !r.lastSabotageTime.IsZero() {
+		r.mu.Unlock()
+
+		remainingCooldown := r.sabotageCooldownSec - int(timeSinceLastSabotage)
+		log.Printf("Sabotage on cooldown: %d seconds remaining", remainingCooldown)
+
+		// Send cooldown message to impostor
+		cooldownMsg := Message{
+			Type: "SABOTAGE_COOLDOWN",
+			Data: map[string]interface{}{
+				"remainingSeconds": remainingCooldown,
+			},
+		}
+		data, _ := json.Marshal(cooldownMsg)
+		for client := range r.clients {
+			if client.PlayerID == playerID {
+				client.send <- data
+				break
+			}
+		}
+		return
+	}
+
 	r.sabotageActive = true
 	r.sabotageType = sabotageType
+	r.lastSabotageTime = time.Now()
 
 	log.Printf("SABOTAGE: %s activated %s", player.Username, sabotageType)
 
@@ -1134,6 +1170,7 @@ func (r *Room) handleFreezeSabotage() {
 		r.mu.Lock()
 		r.sabotageActive = false
 		r.sabotageType = ""
+		r.lastSabotageTime = time.Time{}
 		r.mu.Unlock()
 
 		endMsg := Message{

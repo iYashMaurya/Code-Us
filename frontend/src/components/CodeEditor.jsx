@@ -41,6 +41,7 @@ export default function CodeEditor({ onEmergency }) {
   const currentStage = state.currentStage;
   const timerSeconds = state.timerSeconds;
   const tasksComplete = state.tasksComplete;
+  const userLang = state.language || 'en'; // 🔥 NEW: Get user language
 
 
   const WS_BASE =
@@ -120,7 +121,7 @@ export default function CodeEditor({ onEmergency }) {
     return () => state.ws?.removeEventListener('message', handleSabotage);
   }, [state.ws]);
 
-  // ✅ FIX: Proper Yjs initialization with stage handling
+  // Yjs initialization with stage handling
   useEffect(() => {
     if (!state.roomId || !editorReady || !editorRef.current || !state.task) {
       console.log('⏳ Waiting for editor readiness...');
@@ -135,14 +136,14 @@ export default function CodeEditor({ onEmergency }) {
 
     console.log('🔄 Setting up Yjs for Stage', currentStage);
 
-    // ✅ Clean up previous binding (but keep provider alive)
+    // Clean up previous binding
     if (yjsBindingRef.current) {
       console.log('🧹 Destroying old binding');
       yjsBindingRef.current.destroy();
       yjsBindingRef.current = null;
     }
 
-    // ✅ Create NEW doc for new stage (each stage has its own document)
+    // Create NEW doc for new stage
     if (yjsDocRef.current) {
       yjsDocRef.current.destroy();
     }
@@ -152,7 +153,7 @@ export default function CodeEditor({ onEmergency }) {
     const yjsRoomId = `${state.roomId}-stage${currentStage}`;
     const wsUrl = `${WS_BASE}/yjs`;
     
-    // ✅ Create provider for this stage
+    // Create provider for this stage
     if (yjsProviderRef.current) {
       console.log('🧹 Disconnecting old provider');
       yjsProviderRef.current.disconnect();
@@ -172,14 +173,13 @@ export default function CodeEditor({ onEmergency }) {
 
     const yText = doc.getText('monaco');
     
-    // ✅ Set initial template when doc is empty
+    // Set initial template when doc is empty
     let templateLoaded = false;
     
     provider.on('sync', (isSynced) => {
       if (isSynced) {
         console.log('✅ Yjs synced for Stage', currentStage);
         
-        // Only load template if document is truly empty
         if (!templateLoaded && yText.toString().trim() === '') {
           console.log('📝 Loading template (document empty)');
           yText.insert(0, state.task.template);
@@ -188,7 +188,7 @@ export default function CodeEditor({ onEmergency }) {
       }
     });
     
-    // Fallback: load template after brief delay if still empty
+    // Fallback: load template after brief delay
     setTimeout(() => {
       if (!templateLoaded && yText.toString().trim() === '') {
         console.log('📝 Loading template (fallback)');
@@ -197,7 +197,7 @@ export default function CodeEditor({ onEmergency }) {
       }
     }, 500);
 
-    // ✅ Create Monaco binding
+    // Create Monaco binding
     console.log('🔗 Creating Monaco binding for Stage', currentStage);
     const binding = new MonacoBinding(
       yText,
@@ -207,7 +207,7 @@ export default function CodeEditor({ onEmergency }) {
     );
     yjsBindingRef.current = binding;
 
-    // ✅ Set awareness (cursor colors)
+    // Set awareness (cursor colors)
     const playerIndex = playerList.findIndex(p => p.id === state.playerId);
     const userColor = getPlayerColor(playerIndex);
     
@@ -217,22 +217,21 @@ export default function CodeEditor({ onEmergency }) {
       colorLight: userColor + '80',
     });
 
-    // ✅ Keep awareness alive (heartbeat)
+    // Keep awareness alive (heartbeat)
     if (awarenessTimerRef.current) {
       clearInterval(awarenessTimerRef.current);
     }
     awarenessTimerRef.current = setInterval(() => {
       if (provider && provider.awareness && !state.isEliminated) {
-        // Touch awareness to keep it alive
         provider.awareness.setLocalStateField('user', {
           name: state.username || 'Anonymous',
           color: userColor,
           colorLight: userColor + '80',
         });
       }
-    }, 5000); // Every 5 seconds
+    }, 5000);
 
-    // ✅ Cleanup on unmount or stage change
+    // Cleanup
     return () => {
       console.log('🧹 Cleaning up Yjs for Stage', currentStage);
       
@@ -245,7 +244,6 @@ export default function CodeEditor({ onEmergency }) {
         yjsBindingRef.current = null;
       }
       
-      // Don't destroy provider immediately - wait a bit in case of quick stage transitions
       if (yjsProviderRef.current) {
         setTimeout(() => {
           if (yjsProviderRef.current) {
@@ -270,7 +268,7 @@ export default function CodeEditor({ onEmergency }) {
     const shouldBeReadOnly = state.isEliminated || isFrozen;
     editorRef.current.updateOptions({ readOnly: shouldBeReadOnly });
     
-    // ✅ Remove awareness when eliminated
+    // Remove awareness when eliminated
     if (state.isEliminated && yjsProviderRef.current) {
       yjsProviderRef.current.awareness.setLocalState(null);
     }
@@ -509,6 +507,7 @@ export default function CodeEditor({ onEmergency }) {
               <SabotagePanel 
                 onSabotage={handleSabotage} 
                 isFrozen={isFrozen} 
+                ws={state.ws} 
               />
             ) : (
               <ControlPanel
@@ -563,6 +562,7 @@ export default function CodeEditor({ onEmergency }) {
               />
             </div>
 
+            {/* 🔥 UPDATED: Pass userLang to ChatPanel */}
             <ChatPanel
               messages={state.messages}
               chatMessage={chatMessage}
@@ -571,6 +571,7 @@ export default function CodeEditor({ onEmergency }) {
               isEliminated={state.isEliminated}
               isFrozen={isFrozen}
               chatEndRef={chatEndRef}
+              userLang={userLang}
             />
           </div>
         </div>

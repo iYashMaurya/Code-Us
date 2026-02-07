@@ -5,32 +5,28 @@ import { motion, AnimatePresence } from 'framer-motion';
 import Starfield from './Starfield';
 import Ship, { getShipType } from './Ship';
 
-// ChatBubble component with translation animation
+// 🔥 ChatBubble component with translation animation
 const ChatBubble = ({ message, userLang }) => {
   return (
-    <div className="chat-message-space relative">
-      <span className="font-game text-lg font-bold text-orange">
+    <div className="mb-2 p-2 bg-white/50 rounded border-2 border-brown-dark">
+      <span className="font-game text-base font-bold text-orange block mb-1">
         {message.username}:
       </span>
       
-      {/* The Magic: AnimatePresence allows the old text to exit while new enters */}
-      <div className="inline-block ml-2 relative">
-        <AnimatePresence mode='wait'>
-          <motion.span
-            key={message.translationId || 'original'} // Key change triggers animation
-            initial={{ opacity: 0, filter: 'blur(5px)' }}
-            animate={{ opacity: 1, filter: 'blur(0px)' }}
-            exit={{ opacity: 0, position: 'absolute' }}
-            transition={{ duration: 0.5 }} // The "Cinematic" speed
-            className="font-game text-lg text-gray-900"
-          >
-            {/* Show translation if available and matches user lang, else show original */}
-            {message.translations && message.translations[userLang] 
-              ? message.translations[userLang] 
-              : message.text}
-          </motion.span>
-        </AnimatePresence>
-      </div>
+      <AnimatePresence mode='wait'>
+        <motion.span
+          key={message.translationId || 'original'}
+          initial={{ opacity: 0, filter: 'blur(3px)' }}
+          animate={{ opacity: 1, filter: 'blur(0px)' }}
+          exit={{ opacity: 0, position: 'absolute' }}
+          transition={{ duration: 0.4 }}
+          className="font-game text-base text-gray-900 block"
+        >
+          {message.translations && message.translations[userLang] 
+            ? message.translations[userLang] 
+            : message.text}
+        </motion.span>
+      </AnimatePresence>
     </div>
   );
 };
@@ -64,13 +60,12 @@ export default function Discussion({ onVote }) {
         if (message.type === 'VOTING_TIMER') {
           setTimeLeft(message.data.seconds);
           
-          // Auto-submit skip if time runs out and haven't voted
           if (message.data.seconds === 0 && !hasVoted) {
             handleVoteSubmit('SKIP');
           }
         }
 
-        // 🔥 NEW: Handle translation updates
+        // Handle translation updates
         if (message.type === 'TRANSLATION_UPDATE') {
           dispatch({
             type: 'UPDATE_MESSAGE_TRANSLATION',
@@ -100,14 +95,12 @@ export default function Discussion({ onVote }) {
     }
   }, [state.phase]);
 
-  // Handle Vote
   const handleVoteSubmit = (targetID) => {
     if (hasVoted) return;
     setHasVoted(true);
     onVote(targetID);
   };
 
-  // Helper to check if a player has voted
   const hasPlayerVoted = (playerId) => {
     return state.votesStatus?.[playerId] || false;
   };
@@ -177,7 +170,6 @@ export default function Discussion({ onVote }) {
                         </span>
                       </div>
                       
-                      {/* Vote Indicator */}
                       {hasPlayerVoted(player.id) && (
                         <div className="flex items-center gap-1">
                           <div className="w-3 h-3 bg-green-600 rounded-full border-2 border-brown-dark"></div>
@@ -221,18 +213,18 @@ export default function Discussion({ onVote }) {
               </div>
             </div>
 
-            {/* Right - Chat Panel with Translations */}
+            {/* Right - Chat Panel with Translations - 🔥 IMPROVED SIZE */}
             <div className="col-span-1">
-              <div className="panel-space h-[600px] flex flex-col">
+              <div className="panel-space h-[700px] flex flex-col"> {/* 🔥 Increased from h-[600px] */}
                 <h3 className="font-pixel text-lg mb-3 text-gray-900">DISCUSSION</h3>
                 
-                {/* Messages with Translation Animation */}
-                <div className="flex-1 overflow-y-auto mb-3 space-y-2 min-h-0 bg-white/30 p-3 rounded border-2 border-brown-dark">
-                  {state.messages.map((msg, index) => (
-                    <div key={msg.messageId || index}>
+                {/* Messages with Translation Animation - 🔥 NO DUPLICATES */}
+                <div className="flex-1 overflow-y-auto mb-3 space-y-1 min-h-0 bg-white/30 p-3 rounded border-2 border-brown-dark">
+                  {state.messages.map((msg) => ( // 🔥 Use messageId as key
+                    <div key={msg.messageId || msg.timestamp || Math.random()}>
                       {msg.system ? (
-                        <div className="chat-message-space">
-                          <span className="font-game text-lg italic text-gray-600">{msg.text}</span>
+                        <div className="mb-2 p-2 bg-gray-100 rounded border-2 border-gray-400">
+                          <span className="font-game text-sm italic text-gray-700">{msg.text}</span>
                         </div>
                       ) : (
                         <ChatBubble message={msg} userLang={userLang} />
@@ -250,7 +242,7 @@ export default function Discussion({ onVote }) {
                     onChange={(e) => setChatMessage(e.target.value)}
                     onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
                     placeholder="Discuss..."
-                    className="input-space flex-1 text-lg py-2"
+                    className="input-space flex-1 text-base py-2" 
                   />
                   <button
                     onClick={handleSendMessage}

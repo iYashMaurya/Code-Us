@@ -532,7 +532,7 @@ export default function CodeEditor({ onEmergency }) {
 
           {/* Main Content */}
           <div className="col-span-3 flex flex-col gap-4">
-            <TaskPanel task={state.task} />
+            <TaskPanel task={state.task} userLang={userLang} />
 
             {/* Code Editor */}
             <div className="flex-1 border-4 border-brown-dark overflow-hidden shadow-pixel relative">

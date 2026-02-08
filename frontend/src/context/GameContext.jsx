@@ -21,7 +21,7 @@ const initialState = {
   // Multi-Stage Game State
   phase: 'LOBBY',
   currentStage: 0,
-  timerSeconds: 60,
+  timerSeconds: 120,
   tasksComplete: {},
   role: null,
   isEliminated: false,

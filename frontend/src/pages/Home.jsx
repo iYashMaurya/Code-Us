@@ -6,6 +6,7 @@ import { useGame } from '../context/GameContext';
 import { motion } from 'framer-motion';
 import Starfield from '../components/Starfield';
 import { useLingoContext } from '@lingo.dev/compiler/react';
+import { APP_LANGUAGES } from '../config/languages';
 
 export default function Home() {
   const navigate = useNavigate();
@@ -59,9 +60,12 @@ export default function Home() {
           onChange={handleLanguageChange}
           className="input-space text-lg cursor-pointer"
         >
-          <option value="en">🇬🇧 EN</option>
-          <option value="hi">🇮🇳 HI</option>
-          <option value="de">🇩🇪 DE</option>
+          {/* 👇 DYNAMIC MAPPING */}
+          {APP_LANGUAGES.map((lang) => (
+            <option key={lang.code} value={lang.code}>
+              {lang.label}
+            </option>
+          ))}
         </select>
       </div>
 

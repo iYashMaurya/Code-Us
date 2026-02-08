@@ -1,41 +1,35 @@
 const Redis = require('ioredis');
+const http = require('http');
 const { LingoDotDevEngine } = require('lingo.dev/sdk');
 
-// Configuration from environment variables
-const REDIS_URL = process.env.REDIS_URL || 'localhost:6379';
+const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 const REDIS_PASSWORD = process.env.REDIS_PASSWORD || '';
 const LINGODOTDEV_API_KEY = process.env.LINGODOTDEV_API_KEY;
 const ENVIRONMENT = process.env.ENVIRONMENT || 'development';
+const PORT = process.env.PORT || 3001;
 
-// Supported languages
-const SUPPORTED_LANGUAGES = ['en', 'hi', 'de', 'fr'];
+const TARGET_LANGUAGES = ['hi', 'de', 'fr', 'es'];
+const SOURCE_LANGUAGE = 'en';
 
-// Validate API key
 if (!LINGODOTDEV_API_KEY) {
   console.error('❌ LINGODOTDEV_API_KEY is required');
-  console.error('Get your API key from: https://lingo.dev');
   process.exit(1);
 }
 
-// Initialize Lingo.dev engine
 const lingoDotDev = new LingoDotDevEngine({
   apiKey: LINGODOTDEV_API_KEY,
-  batchSize: 50, // Max items per API request
-  idealBatchItemSize: 500, // Target word count per batch
+  batchSize: 50,
+  idealBatchItemSize: 500,
 });
 
-// Initialize Redis clients (one for pub, one for sub)
 const redisUrl = REDIS_URL.includes('://') ? REDIS_URL : `redis://${REDIS_URL}`;
 const redisOptions = {
   password: REDIS_PASSWORD || undefined,
-  retryStrategy: (times) => {
-    const delay = Math.min(times * 50, 2000);
-    return delay;
-  },
-  maxRetriesPerRequest: 3,
+  maxRetriesPerRequest: null,
+  enableReadyCheck: false,
+  retryStrategy: (times) => Math.min(times * 50, 2000),
 };
 
-// TLS for production
 if (ENVIRONMENT !== 'development' && !REDIS_URL.includes('localhost') && !REDIS_URL.includes('127.0.0.1')) {
   redisOptions.tls = {
     rejectUnauthorized: false,
@@ -45,145 +39,106 @@ if (ENVIRONMENT !== 'development' && !REDIS_URL.includes('localhost') && !REDIS_
 const subscriber = new Redis(redisUrl, redisOptions);
 const publisher = new Redis(redisUrl, redisOptions);
 
-// Channels
-const PROCESSING_CHANNEL = 'chat:processing';
-const TRANSLATIONS_CHANNEL = 'chat:translations';
+const CHAT_PROCESSING_CHANNEL = 'chat:processing';
+const CHAT_TRANSLATIONS_CHANNEL = 'chat:translations';
+const TASK_TRANSLATE_CHANNEL = 'task:translate';
+const TASK_TRANSLATIONS_CHANNEL = 'task:translations';
 
-// Translation cache (in-memory, simple)
 const translationCache = new Map();
-const CACHE_TTL = 3600000; // 1 hour in milliseconds
+const CACHE_TTL = 3600000;
 
-/**
- * Generate cache key
- */
 function getCacheKey(text, targetLang, context) {
   const contextHash = context ? context.join('|') : '';
   return `${text}:${targetLang}:${contextHash}`;
 }
 
-/**
- * Translate text using Lingo.dev SDK with context awareness
- */
-async function translateWithContext(text, sourceLang, targetLang, context = []) {
-  // Check cache first
-  const cacheKey = getCacheKey(text, targetLang, context);
-  const cached = translationCache.get(cacheKey);
-  
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    console.log(`📦 Cache hit for "${text}" -> ${targetLang}`);
-    return cached.translation;
-  }
-
-  try {
-    // For gaming chat, we want fast translations
-    const options = {
-      sourceLocale: sourceLang,
-      targetLocale: targetLang,
-      fast: true, // Prioritize speed for real-time chat
-    };
-
-    // If we have context, include it as a hint in the text
-    // Note: Lingo.dev processes this intelligently for slang and context
-    let textToTranslate = text;
-    if (context.length > 0) {
-      // Add context prefix that Lingo.dev can use
-      // This helps with understanding "he", "it", "that" references
-      const contextHint = `[Context: ${context.slice(-2).join('; ')}]\n${text}`;
-      textToTranslate = contextHint;
-    }
-
-    const translation = await lingoDotDev.localizeText(textToTranslate, options);
-    
-    // If we added context prefix, extract just the translation
-    const cleanTranslation = context.length > 0 
-      ? translation.split('\n').pop().trim() 
-      : translation;
-
-    // Cache the result
-    translationCache.set(cacheKey, {
-      translation: cleanTranslation,
-      timestamp: Date.now(),
-    });
-
-    // Clean old cache entries periodically
-    if (translationCache.size > 1000) {
-      const now = Date.now();
-      for (const [key, value] of translationCache.entries()) {
-        if (now - value.timestamp > CACHE_TTL) {
-          translationCache.delete(key);
-        }
+function cleanCache() {
+  if (translationCache.size > 1000) {
+    const now = Date.now();
+    for (const [key, value] of translationCache.entries()) {
+      if (now - value.timestamp > CACHE_TTL) {
+        translationCache.delete(key);
       }
     }
-
-    return cleanTranslation;
-  } catch (error) {
-    console.error(`❌ Translation error (${sourceLang} -> ${targetLang}):`, error.message);
-    // Fallback: try without context if context caused issues
-    if (context.length > 0) {
-      try {
-        console.log(`⚠️ Retrying without context...`);
-        const simpleTranslation = await lingoDotDev.localizeText(text, {
-          sourceLocale: sourceLang,
-          targetLocale: targetLang,
-          fast: true,
-        });
-        return simpleTranslation;
-      } catch (retryError) {
-        console.error(`❌ Retry failed:`, retryError.message);
-      }
-    }
-    return text; // Fallback to original text
   }
 }
 
-/**
- * Process a chat message for translation
- */
-async function processMessage(messageData) {
-  const { messageId, text, username, context = [], roomId, playerId } = messageData;
+const server = http.createServer((req, res) => {
+  if (req.url === '/health' || req.url === '/') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ 
+      status: 'healthy', 
+      service: 'translation-sidecar',
+      timestamp: new Date().toISOString(),
+      redis: subscriber.status === 'ready' ? 'connected' : 'disconnected',
+      languages: TARGET_LANGUAGES,
+      cacheSize: translationCache.size,
+    }));
+  } else {
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('Not Found');
+  }
+});
 
-  console.log(`📨 Processing message: "${text}" (ID: ${messageId})`);
-  console.log(`   Context: ${context.length} previous messages`);
+server.listen(PORT, () => {
+  console.log(`\n🌐 HTTP health server listening on port ${PORT}`);
+  console.log(`   Health check: http://localhost:${PORT}/health\n`);
+});
 
+// 🔥 FIXED: Proper chat message translation with error handling
+async function processChatMessage(messageData) {
+  const { messageId, text, username, context = [], roomId, playerId, timestamp } = messageData;
+
+  console.log(`\n💬 [CHAT] Processing message: "${text.substring(0, 50)}..."`);
+  console.log(`   ID: ${messageId}`);
+  console.log(`   Room: ${roomId}`);
+  console.log(`   Player: ${username}`);
+  
   const translations = {};
-  const sourceLang = 'en';
 
   try {
-    // Get target languages (all except source)
-    const targetLanguages = SUPPORTED_LANGUAGES.filter(lang => lang !== sourceLang);
+    // Always include original English
+    translations[SOURCE_LANGUAGE] = text;
 
-    // Prepare text with context hint if available
+    // Prepare text for translation
     let textToTranslate = text;
     if (context.length > 0) {
       const contextHint = `[Context: ${context.slice(-2).join('; ')}]\n${text}`;
       textToTranslate = contextHint;
     }
 
-    // Use Lingo.dev's batch translation for efficiency
-    console.log(`   Translating to: ${targetLanguages.join(', ')}`);
+    console.log(`   Translating to: ${TARGET_LANGUAGES.join(', ')}`);
     
+    // Call Lingo.dev API
     const batchResults = await lingoDotDev.batchLocalizeText(textToTranslate, {
-      sourceLocale: sourceLang,
-      targetLocales: targetLanguages,
-      fast: true, // Prioritize speed for real-time chat
+      sourceLocale: SOURCE_LANGUAGE,
+      targetLocales: TARGET_LANGUAGES,
+      fast: true,
     });
 
-    // Map results to language codes
-    targetLanguages.forEach((lang, index) => {
-      const translation = batchResults[index];
-      // If we added context, extract just the translation
-      const cleanTranslation = context.length > 0 
-        ? translation.split('\n').pop().trim() 
-        : translation;
-      
-      translations[lang] = cleanTranslation;
-      console.log(`   ✅ ${lang}: "${cleanTranslation}"`);
+    // Process translations
+    if (!batchResults || batchResults.length === 0) {
+      throw new Error('No translations returned from API');
+    }
+
+    TARGET_LANGUAGES.forEach((lang, index) => {
+      if (batchResults[index]) {
+        const translation = batchResults[index];
+        // Extract just the translation if we added context
+        const cleanTranslation = context.length > 0 
+          ? translation.split('\n').pop().trim() 
+          : translation.trim();
+        
+        translations[lang] = cleanTranslation;
+        console.log(`   ✅ ${lang}: "${cleanTranslation.substring(0, 40)}..."`);
+      } else {
+        // Fallback to original if translation missing
+        translations[lang] = text;
+        console.log(`   ⚠️  ${lang}: Using fallback (no translation)`);
+      }
     });
 
-    // Add original text as 'en' translation
-    translations['en'] = text;
-
-    // Publish results back to Redis
+    // 🔥 CRITICAL: Publish to backend immediately
     const result = {
       messageId,
       username,
@@ -191,89 +146,174 @@ async function processMessage(messageData) {
       translations,
       roomId,
       playerId,
-      timestamp: Date.now(),
+      timestamp: timestamp || Date.now(),
     };
 
-    await publisher.publish(TRANSLATIONS_CHANNEL, JSON.stringify(result));
-    console.log(`✅ Published translations for message ${messageId}`);
-  } catch (error) {
-    console.error(`❌ Error processing message ${messageId}:`, error);
+    const publishedBytes = await publisher.publish(
+      CHAT_TRANSLATIONS_CHANNEL, 
+      JSON.stringify(result)
+    );
+    
+    console.log(`✅ [PUBLISH] Sent to ${publishedBytes} subscriber(s) on ${CHAT_TRANSLATIONS_CHANNEL}`);
+    console.log(`   Message ID: ${messageId}`);
 
-    // Publish error/fallback
-    await publisher.publish(TRANSLATIONS_CHANNEL, JSON.stringify({
+    cleanCache();
+
+  } catch (error) {
+    console.error(`\n❌ [ERROR] Failed to translate message ${messageId}:`);
+    console.error(`   ${error.message}`);
+    console.error(`   Stack: ${error.stack}`);
+
+    // 🔥 CRITICAL: Still publish error response so message appears!
+    const errorResult = {
       messageId,
       username,
       text,
-      translations: { en: text }, // Fallback to original
-      error: error.message,
+      translations: { [SOURCE_LANGUAGE]: text }, // Fallback to original
       roomId,
       playerId,
-    }));
+      timestamp: timestamp || Date.now(),
+      error: error.message,
+    };
+
+    try {
+      const publishedBytes = await publisher.publish(
+        CHAT_TRANSLATIONS_CHANNEL, 
+        JSON.stringify(errorResult)
+      );
+      console.log(`⚠️  [FALLBACK] Published error response to ${publishedBytes} subscriber(s)`);
+      console.log(`   Message ID: ${messageId} - Using original text as fallback`);
+    } catch (pubError) {
+      console.error(`❌ [CRITICAL] Failed to even publish fallback:`, pubError.message);
+    }
   }
 }
 
-/**
- * Main service loop
- */
-async function startService() {
-  console.log('╔═══════════════════════════════════════════════╗');
-  console.log('║   🌐 TRANSLATION SIDECAR SERVICE STARTED     ║');
-  console.log('╚═══════════════════════════════════════════════╝');
-  console.log(`  Engine: Lingo.dev (Gemini Flash 1.5)`);
-  console.log(`  Redis: ${REDIS_URL}`);
-  console.log(`  Supported: ${SUPPORTED_LANGUAGES.join(', ')}`);
-  console.log(`  Listening: ${PROCESSING_CHANNEL}`);
-  console.log(`  Fast mode: Enabled (real-time chat optimized)`);
-  console.log('═══════════════════════════════════════════════');
+async function processTaskTranslation(taskData) {
+  const { taskId, roomId, field, text, requestId } = taskData;
 
-  // Subscribe to processing channel
-  await subscriber.subscribe(PROCESSING_CHANNEL, (err, count) => {
-    if (err) {
-      console.error('❌ Failed to subscribe:', err);
-      process.exit(1);
+  console.log(`\n📋 [TASK] Processing translation: ${taskId}.${field}`);
+  console.log(`   Text: "${text.substring(0, 50)}..."`);
+  
+  const translations = {};
+
+  try {
+    translations[SOURCE_LANGUAGE] = text;
+
+    console.log(`   Translating to: ${TARGET_LANGUAGES.join(', ')}`);
+    
+    const batchResults = await lingoDotDev.batchLocalizeText(text, {
+      sourceLocale: SOURCE_LANGUAGE,
+      targetLocales: TARGET_LANGUAGES,
+      fast: false,
+    });
+
+    if (!batchResults || batchResults.length === 0) {
+      throw new Error('No translations returned from API');
     }
-    console.log(`✅ Subscribed to ${count} channel(s)`);
-  });
 
-  // Handle incoming messages
-  subscriber.on('message', async (channel, message) => {
-    if (channel === PROCESSING_CHANNEL) {
-      try {
-        const messageData = JSON.parse(message);
-        await processMessage(messageData);
-      } catch (error) {
-        console.error('❌ Error parsing message:', error);
+    TARGET_LANGUAGES.forEach((lang, index) => {
+      if (batchResults[index]) {
+        const translation = batchResults[index];
+        translations[lang] = translation.trim();
+        console.log(`   ✅ ${lang}: "${translation.substring(0, 50)}..."`);
+      } else {
+        translations[lang] = text;
+        console.log(`   ⚠️  ${lang}: Using fallback`);
       }
+    });
+
+    const result = {
+      taskId,
+      roomId,
+      field,
+      translations,
+      requestId,
+    };
+
+    const publishedBytes = await publisher.publish(
+      TASK_TRANSLATIONS_CHANNEL, 
+      JSON.stringify(result)
+    );
+    
+    console.log(`✅ [PUBLISH] Sent to ${publishedBytes} subscriber(s) on ${TASK_TRANSLATIONS_CHANNEL}`);
+
+  } catch (error) {
+    console.error(`\n❌ [ERROR] Failed to translate task ${taskId}.${field}:`, error.message);
+
+    const errorResult = {
+      taskId,
+      roomId,
+      field,
+      translations: { [SOURCE_LANGUAGE]: text },
+      requestId,
+      error: error.message,
+    };
+
+    try {
+      const publishedBytes = await publisher.publish(
+        TASK_TRANSLATIONS_CHANNEL, 
+        JSON.stringify(errorResult)
+      );
+      console.log(`⚠️  [FALLBACK] Published error response to ${publishedBytes} subscriber(s)`);
+    } catch (pubError) {
+      console.error(`❌ [CRITICAL] Failed to publish fallback:`, pubError.message);
     }
-  });
-
-  // Error handling
-  subscriber.on('error', (err) => {
-    console.error('❌ Redis subscriber error:', err);
-  });
-
-  publisher.on('error', (err) => {
-    console.error('❌ Redis publisher error:', err);
-  });
-
-  // Graceful shutdown
-  process.on('SIGTERM', async () => {
-    console.log('🛑 Shutting down gracefully...');
-    await subscriber.quit();
-    await publisher.quit();
-    process.exit(0);
-  });
-
-  process.on('SIGINT', async () => {
-    console.log('🛑 Shutting down gracefully...');
-    await subscriber.quit();
-    await publisher.quit();
-    process.exit(0);
-  });
+  }
 }
 
-// Start the service
-startService().catch((error) => {
-  console.error('❌ Fatal error:', error);
-  process.exit(1);
+subscriber.on('message', async (channel, message) => {
+  try {
+    const data = JSON.parse(message);
+
+    if (channel === CHAT_PROCESSING_CHANNEL) {
+      await processChatMessage(data);
+    } else if (channel === TASK_TRANSLATE_CHANNEL) {
+      await processTaskTranslation(data);
+    }
+  } catch (error) {
+    console.error('❌ [PARSER] Error processing message:', error);
+  }
+});
+
+subscriber.subscribe(CHAT_PROCESSING_CHANNEL, TASK_TRANSLATE_CHANNEL, (err, count) => {
+  if (err) {
+    console.error('❌ Failed to subscribe:', err);
+    process.exit(1);
+  }
+
+  console.log('\n╔═══════════════════════════════════════════════╗');
+  console.log('║   🌐 TRANSLATION SIDECAR SERVICE STARTED     ║');
+  console.log('╚═══════════════════════════════════════════════╝');
+  console.log(`  Engine: Lingo.dev SDK`);
+  console.log(`  Redis: ${redisUrl}`);
+  console.log(`  Languages: ${TARGET_LANGUAGES.join(', ')}`);
+  console.log(`  Channels: ${CHAT_PROCESSING_CHANNEL}, ${TASK_TRANSLATE_CHANNEL}`);
+  console.log(`  HTTP Port: ${PORT}`);
+  console.log('═══════════════════════════════════════════════');
+  console.log(`✅ Subscribed to ${count} channel(s)\n`);
+});
+
+subscriber.on('error', (err) => {
+  console.error('❌ Redis subscriber error:', err);
+});
+
+publisher.on('error', (err) => {
+  console.error('❌ Redis publisher error:', err);
+});
+
+process.on('SIGTERM', async () => {
+  console.log('\n🛑 Shutting down gracefully...');
+  await subscriber.quit();
+  await publisher.quit();
+  server.close();
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  console.log('\n🛑 Shutting down gracefully...');
+  await subscriber.quit();
+  await publisher.quit();
+  server.close();
+  process.exit(0);
 });

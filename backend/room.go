@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"math/rand"
@@ -12,6 +13,7 @@ import (
 
 	"code-mafia-backend/database"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
 
@@ -42,8 +44,8 @@ type Task struct {
 	Description    string `json:"description"`
 	Template       string `json:"template"`
 	Title          string `json:"title"`
-	TitleKey       string `json:"titleKey"`
-	DescriptionKey string `json:"descriptionKey"`
+	TitleTranslations       map[string]string `json:"titleTranslations,omitempty"`
+	DescriptionTranslations map[string]string `json:"descriptionTranslations,omitempty"`
 }
 
 type GameState struct {
@@ -87,6 +89,7 @@ type Room struct {
 	freezeTimer         *time.Timer
 	lastSabotageTime    time.Time
 	sabotageCooldownSec int
+	tasksTranslated bool
 }
 
 func newRoom(id string) *Room {
@@ -99,7 +102,7 @@ func newRoom(id string) *Room {
 		gameState: GameState{
 			Phase:         PhaseLobby,
 			CurrentStage:  0,
-			TimerSeconds:  60,
+			TimerSeconds:  120,
 			TasksComplete: make(map[int]bool),
 			TimerPaused:   false,
 		},
@@ -110,6 +113,7 @@ func newRoom(id string) *Room {
 		timerDone:           make(chan struct{}),
 		sabotageActive:      false,
 		sabotageCooldownSec: 10,
+		tasksTranslated:     false,
 	}
 
 	room.loadFromRedis()
@@ -136,6 +140,9 @@ func (r *Room) loadFromRedis() {
 
 	if r.gameState.Phase != PhaseLobby {
 		r.tasks = r.loadAllTasks()
+		if !r.tasksTranslated {
+			go r.requestTaskTranslations()
+		}
 	}
 
 	if r.gameState.Phase >= PhaseTask1 && r.gameState.Phase <= PhaseTask3 {
@@ -166,7 +173,7 @@ func (r *Room) resumeTimerFromRedis() {
 	}
 
 	elapsed := time.Since(startTime).Seconds()
-	remaining := 60 - int(elapsed)
+	remaining := 120 - int(elapsed)
 
 	if remaining > 0 {
 		r.gameState.TimerSeconds = remaining
@@ -247,6 +254,7 @@ func (r *Room) startGame() {
 
 	r.sabotageActive = false
 	r.sabotageType = ""
+	r.lastSabotageTime = time.Time{}
 	if r.freezeTimer != nil {
 		r.freezeTimer.Stop()
 		r.freezeTimer = nil
@@ -287,7 +295,7 @@ func (r *Room) startGame() {
 
 	r.gameState.Phase = PhaseRoleReveal
 	r.gameState.CurrentStage = 0
-	r.gameState.TimerSeconds = 60
+	r.gameState.TimerSeconds = 120
 	r.gameState.TasksComplete = make(map[int]bool)
 	r.gameState.GameStartTime = time.Now()
 
@@ -296,6 +304,7 @@ func (r *Room) startGame() {
 	r.saveToRedis()
 
 	r.mu.Unlock()
+	go r.requestTaskTranslations()
 	log.Printf("[8/10] Broadcasting ROLE_REVEAL state to all clients...")
 
 	r.broadcastGameState()
@@ -323,6 +332,114 @@ func (r *Room) startGame() {
 		log.Printf("[Goroutine] Timer started successfully")
 	}()
 }
+
+func (r *Room) requestTaskTranslations() {
+	log.Printf("🌐 Requesting translations for %d tasks", len(r.tasks))
+	ctx := context.Background()
+	
+	for _, task := range r.tasks {
+		// Create translation request for title
+		titleReq := map[string]interface{}{
+			"type":      "task_translation",
+			"taskId":    task.ID,
+			"roomId":    r.ID,
+			"field":     "title",
+			"text":      task.Title,
+			"requestId": uuid.New().String(),
+		}
+		titleData, _ := json.Marshal(titleReq)
+		database.RDB.Publish(ctx, "task:translate", titleData)
+		
+		// Create translation request for description
+		descReq := map[string]interface{}{
+			"type":      "task_translation",
+			"taskId":    task.ID,
+			"roomId":    r.ID,
+			"field":     "description",
+			"text":      task.Description,
+			"requestId": uuid.New().String(),
+		}
+		descData, _ := json.Marshal(descReq)
+		database.RDB.Publish(ctx, "task:translate", descData)
+	}
+	
+	log.Printf("✅ Sent translation requests for all tasks")
+}
+
+
+func (r *Room) updateTaskTranslations(taskID, field string, translations map[string]string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	
+	taskFound := false
+	for _, task := range r.tasks {
+		if task.ID == taskID {
+			taskFound = true
+			if field == "title" {
+				if task.TitleTranslations == nil {
+					task.TitleTranslations = make(map[string]string)
+				}
+				for lang, text := range translations {
+					task.TitleTranslations[lang] = text
+				}
+				log.Printf("✅ Updated title translations for task %s", taskID)
+				log.Printf("   Available languages: %v", getKeys(task.TitleTranslations))
+			} else if field == "description" {
+				if task.DescriptionTranslations == nil {
+					task.DescriptionTranslations = make(map[string]string)
+				}
+				for lang, text := range translations {
+					task.DescriptionTranslations[lang] = text
+				}
+				log.Printf("✅ Updated description translations for task %s", taskID)
+				log.Printf("   Available languages: %v", getKeys(task.DescriptionTranslations))
+			}
+			
+			break
+		}
+	}
+	
+	if !taskFound {
+		log.Printf("⚠️ Task %s not found for translation update", taskID)
+		return
+	}
+	
+	// Check if all tasks are fully translated
+	allTranslated := true
+	for _, t := range r.tasks {
+		if t.TitleTranslations == nil || len(t.TitleTranslations) == 0 {
+			allTranslated = false
+			log.Printf("   Task %s missing title translations", t.ID)
+			break
+		}
+		if t.DescriptionTranslations == nil || len(t.DescriptionTranslations) == 0 {
+			allTranslated = false
+			log.Printf("   Task %s missing description translations", t.ID)
+			break
+		}
+	}
+	
+	if allTranslated && !r.tasksTranslated {
+		r.tasksTranslated = true
+		log.Printf("🎉 All tasks fully translated!")
+	}
+	
+
+	log.Printf("📡 Broadcasting game state after translation update for %s.%s", taskID, field)
+	
+	// Unlock before broadcasting to avoid deadlock
+	r.mu.Unlock()
+	r.broadcastGameState()
+	r.mu.Lock()
+}
+func getKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 
 func (r *Room) startGlobalTimer() {
 	log.Printf("Starting global timer for room %s", r.ID)
@@ -397,8 +514,6 @@ func (r *Room) loadAllTasks() []*Task {
 		{
 			ID:             "task1-sportbrakes",
 			Stage:          1,
-			TitleKey:       "task1.title",
-			DescriptionKey: "task1.description",
 			Title:          "ENGINE ROOM - Brake System Failure",
 			Description:    "The racing car's brake system is malfunctioning! Fix the constructor to properly initialize SportBrakes.",
 			Template: `public class RacingCar {
@@ -430,13 +545,13 @@ class SportBrakes extends Brakes {
         System.out.println("Sport brakes applied - HIGH PERFORMANCE!");
     }
 }`,
+TitleTranslations:       make(map[string]string),
+			DescriptionTranslations: make(map[string]string),
 		},
 
 		{
 			ID:             "task2-satellite",
 			Stage:          2,
-			TitleKey:       "task2.title",
-			DescriptionKey: "task2.description",
 			Title:          "🛰️ NAVIGATION - Satellite Orbit Calculation",
 			Description:    "The satellite's orbit calculation is broken! Fix the integer division and variable shadowing bugs.",
 			Template: `public class SatelliteSystem {
@@ -461,13 +576,13 @@ class SportBrakes extends Brakes {
         altitude = altitude + 20;
     }
 }`,
+TitleTranslations:       make(map[string]string),
+			DescriptionTranslations: make(map[string]string),
 		},
 
 		{
 			ID:             "task3-oxygen",
 			Stage:          3,
-			TitleKey:       "task3.title",
-			DescriptionKey: "task3.description",
 			Title:          "💨 OXYGEN SYSTEM - Life Support Critical",
 			Description:    "CRITICAL! Fix both the oxygen flow calculation AND the filtration loop logic before the system fails!",
 			Template: `public class OxygenSystem {
@@ -494,6 +609,8 @@ class SportBrakes extends Brakes {
         }
     }
 }`,
+TitleTranslations:       make(map[string]string),
+			DescriptionTranslations: make(map[string]string),
 		},
 	}
 }
@@ -1170,7 +1287,7 @@ func (r *Room) handleFreezeSabotage() {
 		r.mu.Lock()
 		r.sabotageActive = false
 		r.sabotageType = ""
-		r.lastSabotageTime = time.Time{}
+		// r.lastSabotageTime = time.Time{}
 		r.mu.Unlock()
 
 		endMsg := Message{
